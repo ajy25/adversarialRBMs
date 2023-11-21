@@ -1,5 +1,5 @@
 # Boltzmann Encoded Adversarial Machine
-The respository contains an implementation of a Gaussian-Bernoulli BEAM described in the paper [Boltzmann Encoded Adversarial Machines](https://arxiv.org/abs/1804.08682). 
+The respository contains an implementation of a Gaussian-Bernoulli BEAM described in the paper [Boltzmann Encoded Adversarial Machines](https://arxiv.org/abs/1804.08682).
 
 ## Sources: Papers
 1. [Boltzmann Encoded Adversarial Machines](https://arxiv.org/abs/1804.08682) (Fisher et al 2018)
