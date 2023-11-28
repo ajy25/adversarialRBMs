@@ -5,13 +5,12 @@ import json
 from .util import (
     partition_into_batches, k_nearest_neighbors, inverse_distance_sum
 )
-torch.set_default_tensor_type(torch.FloatTensor)
-
+torch.set_default_dtype(torch.float32)
 
 class BEAM(nn.Module):
     """
     Gaussian-Bernoulli Restricted Boltzmann Machine as described in
-    https://arxiv.org/pdf/2210.10318.pdf. Added adversarial component as 
+    https://arxiv.org/pdf/2210.10318. Added adversarial component as 
     described in https://arxiv.org/abs/1804.08682. 
     """
 
@@ -78,7 +77,7 @@ class BEAM(nn.Module):
 
     def _energy(self, v: torch.Tensor, h: torch.Tensor):
         """
-        Equation (1, 2) in https://arxiv.org/pdf/2210.10318.pdf.
+        Equation (1, 2) in https://arxiv.org/pdf/2210.10318.
 
         @args
         - v: torch.Tensor ~ (batch_size, n_vis)
@@ -96,7 +95,7 @@ class BEAM(nn.Module):
     @torch.no_grad()
     def _marginal_energy(self, v: torch.Tensor):
         """
-        Equation (5) in https://arxiv.org/pdf/2210.10318.pdf.
+        Equation (5) in https://arxiv.org/pdf/2210.10318.
 
         @args
         - v: torch.Tensor ~ (batch_size, n_vis)
@@ -114,7 +113,7 @@ class BEAM(nn.Module):
     def _prob_h_given_v(self, v: torch.Tensor):
         """
         Computes sigmoid activation for p(h=1|v) according to equation (3) in
-        https://arxiv.org/pdf/2210.10318.pdf; in other words, computes the
+        https://arxiv.org/pdf/2210.10318; in other words, computes the
         parameters for hidden Bernoulli random variables given visible units.
 
         @args
@@ -129,7 +128,7 @@ class BEAM(nn.Module):
     def _prob_v_given_h(self, h: torch.Tensor):
         """
         Computes mu for p(v|h) according to equation (4) in
-        https://arxiv.org/pdf/2210.10318.pdf.
+        https://arxiv.org/pdf/2210.10318.
 
         @args
         - h: torch.Tensor ~ (batch_size, n_hid)
@@ -243,9 +242,10 @@ class BEAM(nn.Module):
     def cd_loss(self, v: np.ndarray, n_gibbs: int = 1, gamma: float = 1):
         """
         Computes the contrastive divergence loss with which parameters may be
-        updated via an optimizer. Follows Algorithm 4 of
-        https://arxiv.org/pdf/2210.10318.pdf. Also computes the reconstruction
-        loss for training monitoring.
+        updated via an optimizer. Follows Algorithm 3 of
+        https://arxiv.org/pdf/2210.10318. Contrastive divergence loss 
+        may be combined with an adversarial loss as described in 
+        https://arxiv.org/abs/1804.08682. 
 
         @args
         - v: np.array ~ (batch_size, n_vis)
@@ -253,14 +253,13 @@ class BEAM(nn.Module):
         - gamma: float << weight of the non-adversarial loss component
 
         @returns
-        - torch.Tensor << contrastive divergence
-        - torch.Tensor << reconstruction loss
+        - torch.Tensor ~ (1) << contrastive divergence loss
         """
         v_data: torch.Tensor = torch.Tensor(v)
         _, h_data = self._block_gibbs_sample(v_data, n_gibbs=0)
         v_model, h_model = self._block_gibbs_sample(v_data, n_gibbs=n_gibbs)
         L = self._energy(v_data, h_data) - self._energy(v_model, h_model)
-        A = self._nearest_neighbors_critic(h_model)
+        A = self._weighted_neighbors_critic(h_model)
         if A is None:
             A = 0
         else:
@@ -272,7 +271,7 @@ class BEAM(nn.Module):
         """
         Computes the gradient of energy with respect to parameter averaged 
         over the batch size. See the repository associated with the paper 
-        https://arxiv.org/pdf/2210.10318.pdf:
+        https://arxiv.org/pdf/2210.10318:
         https://github.com/DSL-Lab/GRBM/blob/main/grbm.py.
 
         @args
@@ -296,7 +295,7 @@ class BEAM(nn.Module):
         """
         Computes the gradient of energy with respect to parameter. 
         See the repository associated with the paper 
-        https://arxiv.org/pdf/2210.10318.pdf:
+        https://arxiv.org/pdf/2210.10318:
         https://github.com/DSL-Lab/GRBM/blob/main/grbm.py.
 
         @args
@@ -422,23 +421,39 @@ class BEAM(nn.Module):
             param.grad = grad[name]
     
     @torch.no_grad()
-    def _nearest_neighbors_critic(self, h_sample: torch.Tensor, k=10):
+    def _nearest_neighbors_critic(self, h_sample: torch.Tensor, k=2):
         """
         Nearest neighbors linear critic. 
+
+        @args
+        - h_sample: torch.Tensor ~ (batch_size, n_hid)
+        - k: int << the k in k-nearest neighbors
+
+        @returns
+        - torch.Tensor ~ (batch_size)
         """
         if self.adversary_memory is None:
             return None
         batch_size = h_sample.shape[0]
         if batch_size < k:
             return None
-        ind, _ = k_nearest_neighbors(self.adversary_memory, h_sample, k)
+        ind, _ = k_nearest_neighbors(self.adversary_memory, h_sample, k, 
+                                     'hamming')
         j = np.sum(ind >= batch_size, axis=1)
         return torch.Tensor(2 * j / k - 1)
     
     @torch.no_grad()
     def _weighted_neighbors_critic(self, h_sample: torch.Tensor, k=10):
         """
-        Weightest nearest neighbors linear critic. 
+        Weightest nearest neighbors linear critic, as described in 
+        https://arxiv.org/abs/1804.08682. 
+
+        @args
+        - h_sample: torch.Tensor ~ (batch_size, n_hid)
+        - k: int << the k in k-nearest neighbors
+
+        @returns
+        - torch.Tensor ~ (batch_size)
         """
         if self.adversary_memory is None:
             return None
@@ -446,22 +461,35 @@ class BEAM(nn.Module):
         if batch_size < k:
             return None
         ind, distances = k_nearest_neighbors(self.adversary_memory,
-                                                h_sample.numpy(), k)
+                                             h_sample.numpy(), k, 
+                                             'hamming')
         ind_from_data = ind.copy()
         ind_from_data[:, :batch_size] = False
         return torch.Tensor(2 * inverse_distance_sum(distances, ind_from_data) \
                             / inverse_distance_sum(distances, ind) - 1)
         
     def fit(self, X: np.ndarray, n_gibbs: int = 1,
-            lr: float = 0.1, n_epochs: int = 1, batch_size: int = 1,
+            lr: float = 0.1, n_epochs: int = 100, batch_size: int = 10,
             gamma: float = 1.0, gamma_delay: int = 10, fail_tol: int = None,
             rng_seed: int = 0, verbose = False, checkpoint_path = None):
         """
-        Built-in, extremely simple train method. 
+        Built-in, extremely simple train method. Gradients are computed 
+        analytically. 
+
+        @args
+        - X: np.ndarray ~ (n_examples, n_vis)
+        - n_gibbs: int << number of Gibbs sampling steps (k in the CD-k loss), 
+            literature recommends to keep at 1
+        - lr: float << learning rate
+        - n_epochs: int << number of epochs
+        - batch_size: int
+        - gamma: float << proportion of loss coming from the 
         """
+        self.reset_seed(rng_seed)
         if fail_tol is None:
             fail_tol = n_epochs
         optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
         recon_loss_history = 1000
         fail_count = 0
         for epoch in range(n_epochs):
@@ -485,6 +513,7 @@ class BEAM(nn.Module):
                 reconstruction_loss += batch_train_recon
             reconstruction_loss /= len(batched_train_data)
             reconstruction_loss = np.round(reconstruction_loss.numpy(), 3)
+            scheduler.step(reconstruction_loss)
             if reconstruction_loss > recon_loss_history:
                 fail_count += 1
             recon_loss_history = reconstruction_loss
@@ -504,11 +533,13 @@ class BEAM(nn.Module):
             fail_tol: int = None, rng_seed: int = 0, verbose = False, 
             checkpoint_path = None):
         """
-        Built-in, extremely simple train method that relies on Torch autograd. 
+        Built-in, extremely simple train method that relies on Torch autograd 
+        for computation of gradients. 
         """
         if fail_tol is None:
             fail_tol = n_epochs
         optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
         recon_loss_history = 1000
         fail_count = 0
         for epoch in range(n_epochs):
@@ -534,6 +565,7 @@ class BEAM(nn.Module):
                 reconstruction_loss += batch_train_recon
             reconstruction_loss /= len(batched_train_data)
             reconstruction_loss = np.round(reconstruction_loss.numpy(), 3)
+            scheduler.step(reconstruction_loss)
             if reconstruction_loss > recon_loss_history:
                 fail_count += 1
             else:
@@ -555,7 +587,7 @@ def load(checkpoint_path: str, metadata_path: str = None) -> BEAM:
 
    @args
    - checkpoint_path: str
-   - metadata_path: str | None
+   - metadata_path: str | None << if None, infers path from checkpoint_path
 
    @returns
    - BEAM

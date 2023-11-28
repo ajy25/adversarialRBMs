@@ -9,10 +9,14 @@ def partition_into_batches(data: list[np.ndarray], batch_size: int,
    Partitions the data into batches
 
    @args
-   - data: list[np.ndarray ~ (n_train, n_vis)] << each element in the list
+   - data: list[np.ndarray ~ (n_examples, n_vis)] << each element in the list
    represents a distinct element (i.e. input X, label Y, etc)
    - batch_size: int
    - batch_rng_seed: rng seed for shuffling the data
+
+   @returns
+   - output: list[list[np.ndarray ~ (batch_size, n_vis)]]
+   - orig_idx: np.ndarray ~ (n_examples)
    """
    m = data[0].shape[0]
    rand_idx = np.arange(m)
@@ -41,8 +45,8 @@ def kth_smallest(matrix, k):
    kth_values = np.partition(matrix, k, axis=1)[:,k]
    return kth_values.reshape(-1, 1)
 
-def k_nearest_neighbors(data, query, k):
-   distances = distance.cdist(query, data, 'hamming')
+def k_nearest_neighbors(data, query, k, distance_type='euclidean'):
+   distances = distance.cdist(query, data, distance_type)
    nn_bool = distances <= kth_smallest(distances, k)
    return nn_bool, distances
 
