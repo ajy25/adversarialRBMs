@@ -51,9 +51,9 @@ class BEAM(nn.Module):
         - dict
         """
         metadata = {
-            'n_vis': self.n_vis,
-            'n_hid': self.n_hid,
-            'var': self.var
+            "n_vis": self.n_vis,
+            "n_hid": self.n_hid,
+            "var": self.var
         }
         return metadata
 
@@ -284,10 +284,10 @@ class BEAM(nn.Module):
         """
         var = self._variance()
         grad = {}
-        grad['W'] = -torch.einsum("bi,bj->ij", v / var, h) / v.shape[0]
-        grad['b'] = -h.mean(dim=0)
-        grad['mu'] = ((self.mu - v) / var).mean(dim=0)
-        grad['log_var'] = (-0.5 * (v - self.mu)**2 / var +
+        grad["W"] = -torch.einsum("bi,bj->ij", v / var, h) / v.shape[0]
+        grad["b"] = -h.mean(dim=0)
+        grad["mu"] = ((self.mu - v) / var).mean(dim=0)
+        grad["log_var"] = (-0.5 * (v - self.mu)**2 / var +
                             ((v / var) * h.mm(self.W.T))).mean(dim=0)
         return grad     
 
@@ -308,10 +308,10 @@ class BEAM(nn.Module):
         """
         var = self._variance()
         grad = {}
-        grad['W'] = -((v / var)[:, :, np.newaxis] @ h[:, np.newaxis, :])
-        grad['b'] = -h
-        grad['mu'] = ((self.mu - v) / var)
-        grad['log_var'] = (-0.5 * (v - self.mu)**2 / var +
+        grad["W"] = -((v / var)[:, :, np.newaxis] @ h[:, np.newaxis, :])
+        grad["b"] = -h
+        grad["mu"] = ((self.mu - v) / var)
+        grad["log_var"] = (-0.5 * (v - self.mu)**2 / var +
                             ((v / var) * h.mm(self.W.T)))
         return grad
   
@@ -454,11 +454,13 @@ class BEAM(nn.Module):
         
     def fit(self, X: np.ndarray, n_gibbs: int = 1,
             lr: float = 0.1, n_epochs: int = 1, batch_size: int = 1,
-            gamma: float = 1.0, gamma_delay: int = 10, fail_tol: int = 5,
+            gamma: float = 1.0, gamma_delay: int = 10, fail_tol: int = None,
             rng_seed: int = 0, verbose = False, checkpoint_path = None):
         """
         Built-in, extremely simple train method. 
         """
+        if fail_tol is None:
+            fail_tol = n_epochs
         optimizer = torch.optim.Adam(self.parameters(), lr=lr)
         recon_loss_history = 1000
         fail_count = 0
@@ -469,9 +471,9 @@ class BEAM(nn.Module):
             self.train()
             batched_train_data, _ = partition_into_batches([X], \
                 batch_size, rng_seed + epoch)
-            if epoch >= gamma_delay and gamma < 1:
-                self._update_adversary_memory(batched_train_data[0][0])
             for batch in batched_train_data:
+                if epoch >= gamma_delay and gamma < 1:
+                    self._update_adversary_memory(batch[0])
                 optimizer.zero_grad()
                 batch_train_recon = \
                     self._reconstruction_MSE(torch.Tensor(batch[0]))
@@ -490,19 +492,22 @@ class BEAM(nn.Module):
                 print(f"\repoch: {str(epoch+1).zfill(len(str(n_epochs)))} " + \
                     f"of {n_epochs} | recon_loss: {reconstruction_loss}",end="\n")
         if checkpoint_path is not None:
-            metadata_path = ".".join(checkpoint_path.split('.')[:-1]) + \
+            metadata_path = ".".join(checkpoint_path.split(".")[:-1]) + \
                 ".json"
             torch.save(self.state_dict(), checkpoint_path)
-            with open(metadata_path, 'w') as json_file:
+            with open(metadata_path, "w") as json_file:
                 json.dump(self.metadata(), json_file)
 
     def fit_autograd(self, X: np.ndarray, n_gibbs: int = 1,
             lr: float = 0.1, n_epochs: int = 1, batch_size: int = 1,
-            gamma: float = 1.0, gamma_delay: int = 10, fail_tol: int = 5,
-            rng_seed: int = 0, verbose = False, checkpoint_path = None):
+            gamma: float = 1.0, gamma_delay: int = 10, 
+            fail_tol: int = None, rng_seed: int = 0, verbose = False, 
+            checkpoint_path = None):
         """
         Built-in, extremely simple train method that relies on Torch autograd. 
         """
+        if fail_tol is None:
+            fail_tol = n_epochs
         optimizer = torch.optim.Adam(self.parameters(), lr=lr)
         recon_loss_history = 1000
         fail_count = 0
@@ -513,13 +518,13 @@ class BEAM(nn.Module):
             self.train()
             batched_train_data, _ = partition_into_batches([X], \
                 batch_size, rng_seed + epoch)
-            if epoch >= gamma_delay and gamma < 1:
-                self._update_adversary_memory(batched_train_data[0][0],
-                                                n_gibbs=100)
             for batch in batched_train_data:
-                optimizer.zero_grad()
+                if epoch >= gamma_delay and gamma < 1:
+                    self._update_adversary_memory(batch[0],
+                                                    n_gibbs=10)
                 batch_train_recon = \
                     self._reconstruction_MSE(torch.Tensor(batch[0]))
+                optimizer.zero_grad()
                 if epoch >= gamma_delay and gamma < 1:
                     loss = self.cd_loss(batch[0], n_gibbs, gamma)
                 else:
@@ -536,29 +541,31 @@ class BEAM(nn.Module):
             recon_loss_history = reconstruction_loss
             if (epoch + 1) % 5 == 0 and verbose:
                 print(f"\repoch: {str(epoch+1).zfill(len(str(n_epochs)))} " + \
-                    f"of {n_epochs} | recon_loss: {reconstruction_loss}",end="\n")
+                f"of {n_epochs} | recon_loss: {reconstruction_loss}", end="\n")
         if checkpoint_path is not None:
-            metadata_path = ".".join(checkpoint_path.split('.')[:-1]) + \
+            metadata_path = ".".join(checkpoint_path.split(".")[:-1]) + \
                 ".json"
             torch.save(self.state_dict(), checkpoint_path)
-            with open(metadata_path, 'w') as json_file:
+            with open(metadata_path, "w") as json_file:
                 json.dump(self.metadata(), json_file)
 
-def load(checkpoint_path: str, metadata_path: str) -> BEAM:
+def load(checkpoint_path: str, metadata_path: str = None) -> BEAM:
    """
-   Given a checkpoint path and metadata path, construct an BEAM
+   Given a checkpoint path and optionally a metadata path, construct a BEAM
 
    @args
    - checkpoint_path: str
-   - metadata_path: str
+   - metadata_path: str | None
 
    @returns
    - BEAM
    """
-   with open(metadata_path, 'r') as json_file:
+   if metadata_path is None:
+       metadata_path = ".".join(checkpoint_path.split(".")[:-1]) + ".json"
+   with open(metadata_path, "r") as json_file:
        metadata = json.load(json_file)
    beam = BEAM(
-       metadata['n_vis'], metadata['n_hid'], metadata['var']
+       metadata["n_vis"], metadata["n_hid"], metadata["var"]
    )
    beam.load_state_dict(torch.load(checkpoint_path))
    return beam
