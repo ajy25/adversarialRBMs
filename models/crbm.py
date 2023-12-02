@@ -55,8 +55,8 @@ class ConditionalRBM(nn.Module):
             self.n_cond = n_cond
         self.var = var
         self.W = nn.Parameter(torch.Tensor(self.n_vis, self.n_hid))
-        self.mu = nn.Linear(self.n_cond, self.n_vis, bias=False)
-        self.b = nn.Linear(self.n_cond, self.n_hid, bias=False)
+        self.mu = nn.Linear(self.n_cond, self.n_vis, bias=True)
+        self.b = nn.Linear(self.n_cond, self.n_hid, bias=True)
         if self.var is None:
             self.log_var = nn.Parameter(torch.Tensor(self.n_vis))
         else:
@@ -112,6 +112,24 @@ class ConditionalRBM(nn.Module):
         neg = torch.sum(((v / var) @ (self.W)) * h, dim=1) + \
             torch.sum(h * self.b.forward(c), dim=1)
         return (pos - neg) / v.shape[0]
+    
+    def _marginal_energy(self, v: torch.Tensor, c: torch.Tensor):
+        """
+        Equation (5) in https://arxiv.org/pdf/2210.10318.
+
+        @args
+        - v: torch.Tensor ~ (batch_size, n_vis)
+        - c: torch.Tensor ~ (batch_size, n_cond)
+        
+        @returns
+        - torch.Tensor
+        """
+        var = self._variance()
+        pos = torch.sum(torch.square(0.5 * (v - self.mu.forward(c)) \
+                                     / var.sqrt()), dim=1)
+        softmax_logit = ((v / var) @ self.W + self.b.forward(c)).clip(max=80)
+        neg = torch.sum(torch.log(1 + torch.exp(softmax_logit)), dim=1)
+        return pos - neg
     
     @torch.no_grad()
     def reconstruct(self, v: np.ndarray, c: np.ndarray, 
@@ -260,9 +278,8 @@ class ConditionalRBM(nn.Module):
         """
         v_data: torch.Tensor = torch.Tensor(v)
         c: torch.Tensor = torch.Tensor(c)
-        _, h_data = self._block_gibbs_sample(c, v_data, n_gibbs=0)
         v_model, h_model = self._block_gibbs_sample(c, v_data, n_gibbs=n_gibbs)
-        L = self._energy(v_data, c, h_data) - self._energy(v_model, c, h_model)
+        L = self._marginal_energy(v_data, c) - self._marginal_energy(v_model, c)
         A = self._weighted_neighbors_critic(h_model)
         if A is None:
             A = 0
@@ -271,7 +288,7 @@ class ConditionalRBM(nn.Module):
         return gamma * L.mean() + (1 - gamma) * A
     
     @torch.no_grad()
-    def _weighted_neighbors_critic(self, h_sample: torch.Tensor, k=2):
+    def _weighted_neighbors_critic(self, h_sample: torch.Tensor, k=5):
         """
         Weightest nearest neighbors linear critic, as described in 
         https://arxiv.org/abs/1804.08682. 
@@ -337,7 +354,7 @@ class ConditionalRBM(nn.Module):
         for epoch in range(1, n_epochs + 1):
             if fail_count >= fail_tol:
                 break
-            reconstruction_loss = 0
+            recon_loss = 0
             self.train()
             batched_train_data, _ = partition_into_batches([X, y], \
                 batch_size, rng_seed + epoch)
@@ -362,21 +379,21 @@ class ConditionalRBM(nn.Module):
                     loss = self.cd_loss(batch[0], batch[1], n_gibbs)
                 loss.backward()
                 optimizer.step()
-                reconstruction_loss += batch_train_recon
-            reconstruction_loss /= len(batched_train_data)
+                recon_loss += batch_train_recon
+            recon_loss /= len(batched_train_data)
             if reduce_lr_on_plateau:
-                scheduler.step(reconstruction_loss)
-            reconstruction_loss = np.round(reconstruction_loss.numpy(), 3)
-            if reconstruction_loss > recon_loss_history:
+                scheduler.step(recon_loss)
+            if recon_loss > recon_loss_history:
                 fail_count += 1
             else:
                 fail_count = 0
-            recon_loss_history = reconstruction_loss
+            recon_loss_history = recon_loss
             if verbose_interval is not None:
                 if epoch % verbose_interval == 0:
                     message = f"\repoch: {str(epoch).zfill(len(str(n_epochs)))}"
                     message += f" of {n_epochs} |"
-                    message += f" recon_loss: {reconstruction_loss}"
+                    message += f" recon_loss: {round(recon_loss.item(), 3)}"
+                    message += f" | cd_loss: {round(loss.item(), 3)}"
                     print(message, end="\n")
         if checkpoint_path is not None:
             metadata_path = ".".join(checkpoint_path.split(".")[:-1]) + \
