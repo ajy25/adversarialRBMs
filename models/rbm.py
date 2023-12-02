@@ -451,7 +451,7 @@ class RBM(nn.Module):
         return torch.Tensor(2 * j / k - 1)
     
     @torch.no_grad()
-    def _weighted_neighbors_critic(self, h_sample: torch.Tensor, k=10):
+    def _weighted_neighbors_critic(self, h_sample: torch.Tensor, k=2):
         """
         Weightest nearest neighbors linear critic, as described in 
         https://arxiv.org/abs/1804.08682. 
@@ -511,10 +511,10 @@ class RBM(nn.Module):
                 batch_size, rng_seed + epoch)
             for batch in batched_train_data:
                 if contains_missing:
-                    missing_mask = np.isnan(batch)
+                    missing_mask = np.isnan(batch[0])
                     clamp = np.logical_not(missing_mask)
-                    batch[missing_mask] = 0
-                    batch = self.reconstruct(v=batch, clamp=clamp,
+                    batch[0][missing_mask] = 0
+                    batch[0] = self.reconstruct(v=batch[0], clamp=clamp,
                                              random_init=False, n_gibbs=n_gibbs)
                 if epoch >= gamma_delay and gamma < 1:
                     self._update_adversary_memory(batch[0])
@@ -574,10 +574,10 @@ class RBM(nn.Module):
                 batch_size, rng_seed + epoch)
             for batch in batched_train_data:
                 if contains_missing:
-                    missing_mask = np.isnan(batch)
+                    missing_mask = np.isnan(batch[0])
                     clamp = np.logical_not(missing_mask)
-                    batch[missing_mask] = 0
-                    batch = self.reconstruct(v=batch, clamp=clamp,
+                    batch[0][missing_mask] = 0
+                    batch[0] = self.reconstruct(v=batch[0], clamp=clamp,
                                              random_init=False, n_gibbs=n_gibbs)
                 if epoch >= gamma_delay and gamma < 1:
                     self._update_adversary_memory(batch[0],
