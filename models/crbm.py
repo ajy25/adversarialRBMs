@@ -55,10 +55,10 @@ class ConditionalRBM(nn.Module):
             self.n_cond = n_cond
         self.var = var
         self.W = nn.Parameter(torch.Tensor(self.n_vis, self.n_hid))
-        self.mu = nn.Linear(self.n_cond, self.n_vis)
-        self.b = nn.Linear(self.n_cond, self.n_hid)
+        self.mu = nn.Linear(self.n_cond, self.n_vis, bias=False)
+        self.b = nn.Linear(self.n_cond, self.n_hid, bias=False)
         if self.var is None:
-            self.log_var = nn.Linear(self.n_cond, self.n_vis)
+            self.log_var = nn.Parameter(torch.Tensor(self.n_vis))
         else:
             self.log_var = torch.ones((self.n_vis)) * np.log(var)
         self.reset_parameters()
@@ -72,7 +72,7 @@ class ConditionalRBM(nn.Module):
         self.mu.reset_parameters()
         self.b.reset_parameters()
         if self.var is None:
-            self.log_var.reset_parameters()
+            nn.init.constant_(self.log_var, 0)
 
     def reset_seed(self, seed: int):
         """
@@ -83,7 +83,7 @@ class ConditionalRBM(nn.Module):
         """
         self.rng.manual_seed(seed)
 
-    def _variance(self, c):
+    def _variance(self):
         """
         Returns the variance; we only attempt to train the log variance.
 
@@ -93,7 +93,7 @@ class ConditionalRBM(nn.Module):
         @returns
         - torch.Tensor | float
         """
-        return torch.exp(self.log_var.forward(c))
+        return torch.exp(self.log_var)
 
     def _energy(self, v: torch.Tensor, c: torch.Tensor, h: torch.Tensor):
         """
@@ -131,6 +131,7 @@ class ConditionalRBM(nn.Module):
         @returns
         - np.array ~ (batch_size, n_vis)
         """
+        c = torch.Tensor(c)
         if random_init:
             v = torch.randn(v.shape, generator=self.rng).requires_grad_(False)
         else:
@@ -147,7 +148,7 @@ class ConditionalRBM(nn.Module):
     @torch.no_grad()
     def _block_gibbs_sample(self, c: torch.Tensor, v: torch.Tensor = None, 
                             h: torch.Tensor = None, clamp: torch.Tensor = None,
-                            n_gibbs = 1, add_noise = True):
+                            n_gibbs = 1, add_noise = False):
         """
         Familiar block Gibbs sampling method of visible and hidden units.
 
@@ -166,7 +167,7 @@ class ConditionalRBM(nn.Module):
         - torch.Tensor ~ (batch_size, n_vis)
         - torch.Tensor ~ (batch_size, n_hid)
         """
-        std = self._variance(c).sqrt()
+        std = self._variance().sqrt()
         if clamp is not None:
             clamp = clamp.bool()
         if v is None and h is None:
@@ -205,7 +206,7 @@ class ConditionalRBM(nn.Module):
         @returns
         - torch.Tensor ~ (batch_size, n_hid)
         """
-        return torch.sigmoid((v / self._variance(c)) @ self.W + self.b.forward(c))
+        return torch.sigmoid((v / self._variance()) @ self.W + self.b.forward(c))
 
     @torch.no_grad()
     def _prob_v_given_h(self, h: torch.Tensor, c: torch.Tensor):
@@ -349,7 +350,7 @@ class ConditionalRBM(nn.Module):
                                                 clamp=clamp, random_init=False, 
                                                 n_gibbs=n_gibbs)
                 if epoch >= gamma_delay and gamma < 1:
-                    self._update_adversary_memory(batch[0],
+                    self._update_adversary_memory(batch[0], batch[1],
                                                     n_gibbs=10)
                 batch_train_recon = \
                     self._reconstruction_MSE(torch.Tensor(batch[0]), 
@@ -383,4 +384,27 @@ class ConditionalRBM(nn.Module):
             torch.save(self.state_dict(), checkpoint_path)
             with open(metadata_path, "w") as json_file:
                 json.dump(self.metadata(), json_file)
+
+def load(checkpoint_path: str, metadata_path: str = None) -> ConditionalRBM:
+    """
+    Given a checkpoint path and optionally a metadata path, construct a
+    ConditionalRBM
+
+    @args
+    - checkpoint_path: str
+    - metadata_path: str | None << if None, infers path from checkpoint_path
+
+    @returns
+    - ConditionalRBM
+    """
+    if metadata_path is None:
+        metadata_path = ".".join(checkpoint_path.split(".")[:-1]) + ".json"
+    with open(metadata_path, "r") as json_file:
+        metadata = json.load(json_file)
+    model = ConditionalRBM(
+        metadata["n_vis"], metadata["n_hid"], metadata["n_cond"], 
+        metadata["var"]
+    )
+    model.load_state_dict(torch.load(checkpoint_path))
+    return model
 
