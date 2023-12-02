@@ -1,5 +1,5 @@
 # Boltzmann Encoded Adversarial Machine
-This respository contains an implementation of a Gaussian-Bernoulli BEAM described in the paper 
+This respository contains an implementation of a Gaussian-Bernoulli RBM described in the paper 
 [Boltzmann Encoded Adversarial Machines](https://arxiv.org/abs/1804.08682). We attempt to implement the BEAM and 
 reproduce results from the paper. 
 

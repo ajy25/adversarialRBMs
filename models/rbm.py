@@ -14,7 +14,7 @@ class RBM(nn.Module):
     described in https://arxiv.org/abs/1804.08682. 
     """
 
-    def __init__(self, n_vis: int, n_hid: int, variance: float = None):
+    def __init__(self, n_vis: int, n_hid: int, var: float = None):
         """
         Constructs a Gaussian-Bernoulli Restricted Boltzmann Machine with 
         adversarial training on hidden units.
@@ -22,24 +22,14 @@ class RBM(nn.Module):
         @args
         - n_vis: int << number of visible nodes
         - n_hid: int << number of hidden nodes
-        - variance: float | None << set variance for each visible node;
+        - var: float | None << set variance for each visible node;
             if None, we learn the variance on each visible node
         """
         super().__init__()
         self.rng = torch.Generator()
         self.reset_seed(42)
         self.adversary_memory = None
-        self.n_vis = n_vis
-        self.n_hid = n_hid
-        self.var = variance
-        self.W = nn.Parameter(torch.Tensor(self.n_vis, self.n_hid))
-        self.mu = nn.Parameter(torch.Tensor(self.n_vis))
-        self.b = nn.Parameter(torch.Tensor(self.n_hid))
-        if self.var is None:
-            self.log_var = nn.Parameter(torch.Tensor(self.n_vis))
-        else:
-            self.log_var = torch.ones((self.n_vis)) * np.log(variance)
-        self.reset_parameters()
+        self.reset_hyperparameters(n_vis=n_vis, n_hid=n_hid, var=var)
 
     def metadata(self):
         """
@@ -62,6 +52,13 @@ class RBM(nn.Module):
         if n_hid is not None:
             self.n_hid = n_hid
         self.var = var
+        self.W = nn.Parameter(torch.Tensor(self.n_vis, self.n_hid))
+        self.mu = nn.Parameter(torch.Tensor(self.n_vis))
+        self.b = nn.Parameter(torch.Tensor(self.n_hid))
+        if self.var is None:
+            self.log_var = nn.Parameter(torch.Tensor(self.n_vis))
+        else:
+            self.log_var = torch.ones((self.n_vis)) * np.log(var)
         self.reset_parameters()
 
     def reset_parameters(self, seed: int = 42):
@@ -209,7 +206,6 @@ class RBM(nn.Module):
 
         @args
         - v: torch.Tensor ~ (batch_size, n_vis)
-        - n_gibbs: int
 
         @ returns
         - torch.Tensor
