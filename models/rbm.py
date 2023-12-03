@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import json
+import os
 from .util import (
     partition_into_batches, k_nearest_neighbors, inverse_distance_sum, 
     approx_kl_div
@@ -632,9 +633,14 @@ class RBM(nn.Module):
                     msg += f" | kl_data_model: {round(kl_data_model, 3)}"
                     msg += f" | kl_model_data: {round(kl_model_data, 3)}"
                     print(msg, end="\n")
+            if checkpoint_path is not None:
+                metadata_path = os.path.splitext(checkpoint_path)[0] + f"-{epoch}" + ".json"
+                newpath = os.path.splitext(checkpoint_path)[0] + f"-{epoch}" + ".pth"
+                torch.save(self.state_dict(), newpath)
+                with open(metadata_path, "w") as json_file:
+                    json.dump(self.metadata(), json_file)
         if checkpoint_path is not None:
-            metadata_path = ".".join(checkpoint_path.split(".")[:-1]) + \
-                ".json"
+            metadata_path = os.path.splitext(checkpoint_path)[0] + ".json"
             torch.save(self.state_dict(), checkpoint_path)
             with open(metadata_path, "w") as json_file:
                 json.dump(self.metadata(), json_file)
