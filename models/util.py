@@ -45,61 +45,94 @@ def kth_smallest(matrix, k):
    kth_values = np.partition(matrix, k, axis=1)[:, k]
    return kth_values.reshape(-1, 1)
 
-# def k_nearest_neighbors(data, query, k):
-#     distances = distance.cdist(query, data, 'euclidean')
-#     nn_bool = distances < kth_smallest(distances, k)
-#     num_neighbors = np.sum(nn_bool, axis=1)
-#     num_needed = k - num_neighbors
-#     print(num_needed)
-#     nn_equal = distances == kth_smallest(distances, k)
-#     for i in range(nn_equal.shape[0]):
-#         true_indices = np.nonzero(nn_equal[i, :])[0]
-#         print(len(true_indices))
-#         if len(true_indices) > num_needed[i]:
-#             selected_indices = np.random.choice(true_indices, size=num_needed[i], replace=False)
-#             print(selected_indices)
-#             nn_bool[i, selected_indices] = True
-#         else:
-#             nn_bool[i, true_indices] = True
-#     return nn_bool, distances
+def k_nearest_neighbors2(data, query, k):
+    distances = distance.cdist(query, data, 'euclidean')
+    nn_bool = distances < kth_smallest(distances, k)
+    num_neighbors = np.sum(nn_bool, axis=1)
+    num_needed = k - num_neighbors
+    nn_equal = distances == kth_smallest(distances, k)
+    # for i in range(nn_equal.shape[0]):
+    #     true_indices = np.nonzero(nn_equal[i, :])[0]
+    #     if len(true_indices) > num_needed[i]:
+    #         selected_indices = np.random.choice(true_indices, size=num_needed[i], replace=False)
+    #         nn_bool[i, selected_indices] = True
+    #     else:
+    #         nn_bool[i, true_indices] = True
+    return nn_bool, distances
 
-# def inverse_distance_sum(distances, index):
-#    return np.sum(1 / (distances + eps) * index, axis=1)
+def inverse_distance_sum(distances, boolean_mask = None):
+   if boolean_mask is None:
+       return np.sum(1 / (distances + eps), axis=1)
+   return np.sum(1 / (distances + eps) * boolean_mask, axis=1)
 
 def k_nearest_neighbors(data, query, k=1):
     tree = cKDTree(data)
     distances, indices = tree.query(query, k=k)
     return indices, distances
 
-def inverse_distance_sum(distances, indices):
-    return np.sum(1 / (distances + eps), axis=1)
+# def inverse_distance_sum(distances):
+#     return np.sum(1 / (distances + eps), axis=1)
 
-def kth_nearest_neighbor_distance(data, query, k=1):
-    tree = cKDTree(data)
-    distances, indices = tree.query(query, k=k)
-    return indices, distances
+def kth_nearest_neighbor_distance(data, query = None, k = 1):
+    """
+    If query is None, then query = data. In this case we exclude self when 
+    computing nearest neighbors. 
+    """
+    if query is None:
+        # when finding nearest neighbors for X_i, we can exclude X_i
+        # from data by simpling adding one to k, since the 1-st 
+        # nearest neighbor would be X_i. 
+        query = data
+        k += 1
+    distances = distance.cdist(query, data, metric='euclidean')
+    top_k_distances = np.sort(distances, axis=1)[:, :k]
+    return top_k_distances[:, -1]
 
-def approx_kl_div(p_samples: np.ndarray, q_samples: np.ndarray):
+def approx_kl_div(p_samples: np.ndarray, q_samples: np.ndarray, k=1):
     """
     Estimates KL(p || q) given samples from p and q, as described in equation 5 
     of the 2009 paper on multi-dimensional KL divergence estimation, 
     https://www.princeton.edu/~kulkarni/Papers/Journals/j068_2009_WangKulVer_TransIT.pdf
 
-    p_samples: np.array ~ (n, d)
-    q_samples: np.array ~ (m, d)
+    @args
+    - p_samples: np.array ~ (n, d)
+    - q_samples: np.array ~ (m, d)
+    - k: k-NN
+
+    @returns
+    - float
     """
     n = len(p_samples)
     m = len(q_samples)
     d = p_samples.shape[1]
-    nu = kth_nearest_neighbor_distance(p_samples, q_samples, k=1)
-    rho = kth_nearest_neighbor_distance(p_samples, q_samples, k=1)
-    return d * np.mean(np.log2(nu / rho)) + np.log2(m / n - 1)
+    nu = kth_nearest_neighbor_distance(q_samples, p_samples, k=k)
+    rho = kth_nearest_neighbor_distance(p_samples, k=k)
+    return (d * np.mean(np.log2(nu / rho), axis=0) + np.log2(m / (n - 1))).item()
 
 if __name__ == "__main__":
-    X = np.zeros(5).reshape(-1, 1)
-    Y = np.arange(5).reshape(-1, 1)
-    print(kth_nearest_neighbor_distance(X, Y, 1))
+    X = np.arange(7, 19, step=2).reshape(-1, 1)
+    Y = np.arange(25).reshape(-1, 1)
+    indices, distances = k_nearest_neighbors(Y, X, k=2)
+    ind_cond = indices >= 6
+    print(inverse_distance_sum(distances, ind_cond))
+    print(inverse_distance_sum(distances))
+    print()
 
+    indices, distances = k_nearest_neighbors2(Y, X, k=2)
+    ind_cond = indices.copy()
+    ind_cond[:, :6] = False
+    print(inverse_distance_sum(distances, ind_cond))
+    print(inverse_distance_sum(distances, indices))
+
+    # sigma_1 = 2
+    # sigma_2 = 1
+    # true_kl = np.log(sigma_2 / sigma_1) + (sigma_1 ** 2 / (2 * sigma_2 ** 2)) - 1/2
+    # p_sample = np.random.standard_normal(size=10000).reshape(-1, 1) * sigma_1 + 10
+    # print(p_sample)
+    # q_sample = np.random.standard_normal(size=10000).reshape(-1, 1) + 10
+    # print(q_sample)
+    # print(approx_kl_div(p_sample, q_sample))
+    # print(true_kl)
 
 
 

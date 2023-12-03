@@ -259,15 +259,13 @@ class RBM(nn.Module):
         - float << kl_vdata_vmodel
         - float << kl_vmodel_vdata
         """
-        _, h_data = self._block_gibbs_sample(torch.Tensor(v), n_gibbs=0)
-        v_model, h_model = self._block_gibbs_sample(
-            torch.zeros_like(torch.Tensor(v)), n_gibbs=n_gibbs)
-        h_data = h_data.numpy()
-        h_model = h_model.numpy()
-        # kl_vdata_vmodel = self._approx_kl_div(h_data, h_model).item()
-        # kl_vmodel_vdata = self._approx_kl_div(h_model, h_data).item()
-        recon_mse = torch.mean((v_model - v) ** 2).item()
-        return recon_mse, 0, 0
+        v_model, _ = self._block_gibbs_sample(torch.Tensor(v), 
+                                              n_gibbs=n_gibbs)
+        v_model = v_model.numpy()
+        kl_vdata_vmodel = approx_kl_div(v, v_model)
+        kl_vmodel_vdata = approx_kl_div(v_model, v)
+        recon_mse = self._reconstruction_MSE(torch.Tensor(v)).item()
+        return recon_mse, kl_vdata_vmodel, kl_vmodel_vdata
 
     def cd_loss(self, v: np.ndarray, n_gibbs: int = 1, gamma: float = 1):
         """
@@ -287,11 +285,14 @@ class RBM(nn.Module):
         """
         v_data: torch.Tensor = torch.Tensor(v)
         _, h_data = self._block_gibbs_sample(v_data, n_gibbs=0)
-        v_model, h_model = self._block_gibbs_sample(v_data, n_gibbs=n_gibbs)
+        v_model, h_model = self._block_gibbs_sample(v_data, 
+                                                    n_gibbs=n_gibbs)
         L = self._energy(v_data, h_data) - self._energy(v_model, h_model)
+        if gamma == 1:
+            return L.mean()
         A = self._weighted_neighbors_critic(h_model)
         if A is None:
-            A = 0
+            return L.mean()
         else:
             A = torch.mean(A)
         return gamma * L.mean() + (1 - gamma) * A
@@ -379,7 +380,7 @@ class RBM(nn.Module):
         grad = {}
         for key in pos_grad.keys():
             grad[key] = torch.mean(pos_grad[key] - neg_grad[key], dim=0)
-            critic = self._weighted_neighbors_critic(h_model)
+            critic = self._nearest_neighbors_critic(h_model)
             if critic is not None:
                 grad[key] = gamma * grad[key] + (1 - gamma) * \
                     self._adversarial_grad(critic, neg_grad[key])
@@ -451,7 +452,7 @@ class RBM(nn.Module):
             param.grad = grad[name]
     
     @torch.no_grad()
-    def _nearest_neighbors_critic(self, h_sample: torch.Tensor, k=2):
+    def _nearest_neighbors_critic(self, h_sample: torch.Tensor, k=5):
         """
         Nearest neighbors linear critic. 
 
@@ -472,7 +473,7 @@ class RBM(nn.Module):
         return torch.Tensor(2 * j / k - 1)
     
     @torch.no_grad()
-    def _weighted_neighbors_critic(self, h_sample: torch.Tensor, k=2):
+    def _weighted_neighbors_critic(self, h_sample: torch.Tensor, k=5):
         """
         Weightest nearest neighbors linear critic, as described in 
         https://arxiv.org/abs/1804.08682. 
@@ -491,10 +492,9 @@ class RBM(nn.Module):
             return None
         ind, distances = k_nearest_neighbors(self.adversary_memory,
                                              h_sample.numpy(), k)
-        ind_data = ind[ind >= batch_size]
-        ind_model = ind[ind < batch_size]
-        return torch.Tensor(2 * inverse_distance_sum(distances, ind_data) \
-                            / inverse_distance_sum(distances, ind_model) - 1)
+        mask_data = ind >= batch_size
+        return torch.Tensor(2 * inverse_distance_sum(distances, mask_data) \
+                            / inverse_distance_sum(distances) - 1)
         
     def fit(self, X: np.ndarray, n_gibbs: int = 1,
             lr: float = 0.1, n_epochs: int = 100, batch_size: int = 10,
@@ -514,6 +514,12 @@ class RBM(nn.Module):
         - batch_size: int
         - gamma: float << proportion of loss coming from the 
         """
+        stats = {
+            'epoch_num': [],
+            'recon_mse': [],
+            'kl_data_model': [],
+            'kl_model_data': []
+        }
         self.reset_seed(rng_seed)
         contains_missing = np.any(np.isnan(X))
         if fail_tol is None:
@@ -522,7 +528,7 @@ class RBM(nn.Module):
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
         recon_loss_history = 1000
         fail_count = 0
-        for epoch in range(1, n_epochs + 1):
+        for epoch in range(0, n_epochs + 1):
             if fail_count >= fail_tol:
                 break
             reconstruction_loss = 0
@@ -550,22 +556,32 @@ class RBM(nn.Module):
             reconstruction_loss /= len(batched_train_data)
             if reduce_lr_on_plateau:
                 scheduler.step(reconstruction_loss)
-            reconstruction_loss = np.round(reconstruction_loss.numpy(), 3)
             if reconstruction_loss > recon_loss_history:
                 fail_count += 1
             recon_loss_history = reconstruction_loss
             if verbose_interval is not None:
                 if epoch % verbose_interval == 0:
-                    message = f"\repoch: {str(epoch).zfill(len(str(n_epochs)))}"
-                    message += f" of {n_epochs} | "
-                    message += f"recon_loss: {reconstruction_loss}"
-                    print(message, end="\n")
+                    msg = f"\repoch: {str(epoch).zfill(len(str(n_epochs)))}"
+                    msg += f" of {n_epochs}"
+                    metrics_idx = np.random.choice(len(X), min(100, len(X)), 
+                                                   replace=False)
+                    recon_mse, kl_data_model, kl_model_data \
+                        = self.metrics(X[metrics_idx], n_gibbs=n_gibbs)
+                    msg += f" | recon_mse: {round(recon_mse, 3)}"
+                    msg += f" | kl_data_model: {round(kl_data_model, 3)}"
+                    msg += f" | kl_model_data: {round(kl_model_data, 3)}"
+                    print(msg, end="\n")
+                    stats['epoch_num'].append(epoch)
+                    stats['recon_mse'].append(recon_mse)
+                    stats['kl_data_model'].append(kl_data_model)
+                    stats['kl_model_data'].append(kl_model_data)
         if checkpoint_path is not None:
             metadata_path = ".".join(checkpoint_path.split(".")[:-1]) + \
                 ".json"
             torch.save(self.state_dict(), checkpoint_path)
             with open(metadata_path, "w") as json_file:
                 json.dump(self.metadata(), json_file)
+        return stats
 
     def fit_autograd(self, X: np.ndarray, n_gibbs: int = 1,
             lr: float = 0.1, n_epochs: int = 1, batch_size: int = 1,
@@ -577,6 +593,12 @@ class RBM(nn.Module):
         Built-in, simple train method that relies on Torch autograd 
         for computation of gradients. Robust to NaNs in X. 
         """
+        stats = {
+            'epoch_num': [],
+            'recon_mse': [],
+            'kl_data_model': [],
+            'kl_model_data': []
+        }
         self.reset_seed(rng_seed)
         contains_missing = np.any(np.isnan(X))
         if fail_tol is None:
@@ -585,7 +607,7 @@ class RBM(nn.Module):
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
         recon_loss_history = 1000
         fail_count = 0
-        for epoch in range(1, n_epochs + 1):
+        for epoch in range(0, n_epochs + 1):
             if fail_count >= fail_tol:
                 break
             reconstruction_loss = 0
@@ -625,24 +647,31 @@ class RBM(nn.Module):
                 if epoch % verbose_interval == 0:
                     msg = f"\repoch: {str(epoch).zfill(len(str(n_epochs)))}"
                     msg += f" of {n_epochs}"
-                    msg += f" | cd_loss: {round(loss.item(), 3)}"
+                    metrics_idx = np.random.choice(len(X), min(100, len(X)), 
+                                                   replace=False)
                     recon_mse, kl_data_model, kl_model_data \
-                        = self.metrics(batch[0])
+                        = self.metrics(X[metrics_idx], n_gibbs=n_gibbs)
+                    msg += f" | loss: {round(loss.item(), 3)}"
                     msg += f" | recon_mse: {round(recon_mse, 3)}"
                     msg += f" | kl_data_model: {round(kl_data_model, 3)}"
                     msg += f" | kl_model_data: {round(kl_model_data, 3)}"
                     print(msg, end="\n")
-            if checkpoint_path is not None:
-                metadata_path = os.path.splitext(checkpoint_path)[0] + f"-{epoch}" + ".json"
-                newpath = os.path.splitext(checkpoint_path)[0] + f"-{epoch}" + ".pth"
-                torch.save(self.state_dict(), newpath)
-                with open(metadata_path, "w") as json_file:
-                    json.dump(self.metadata(), json_file)
+                    stats['epoch_num'].append(epoch)
+                    stats['recon_mse'].append(recon_mse)
+                    stats['kl_data_model'].append(kl_data_model)
+                    stats['kl_model_data'].append(kl_model_data)
+            # if checkpoint_path is not None:
+            #     metadata_path = os.path.splitext(checkpoint_path)[0] + f"-{epoch}" + ".json"
+            #     newpath = os.path.splitext(checkpoint_path)[0] + f"-{epoch}" + ".pth"
+            #     torch.save(self.state_dict(), newpath)
+            #     with open(metadata_path, "w") as json_file:
+            #         json.dump(self.metadata(), json_file)
         if checkpoint_path is not None:
             metadata_path = os.path.splitext(checkpoint_path)[0] + ".json"
             torch.save(self.state_dict(), checkpoint_path)
             with open(metadata_path, "w") as json_file:
                 json.dump(self.metadata(), json_file)
+        return stats
 
 def load(checkpoint_path: str, metadata_path: str = None) -> RBM:
     """
