@@ -1,6 +1,5 @@
 import numpy as np
-from scipy.spatial import distance, cKDTree
-from scipy.stats import entropy
+from scipy.spatial import cKDTree, distance
 
 eps = np.finfo(np.float32).eps
 
@@ -46,20 +45,39 @@ def kth_smallest(matrix, k):
    kth_values = np.partition(matrix, k, axis=1)[:, k]
    return kth_values.reshape(-1, 1)
 
+# def k_nearest_neighbors(data, query, k):
+#     distances = distance.cdist(query, data, 'euclidean')
+#     nn_bool = distances < kth_smallest(distances, k)
+#     num_neighbors = np.sum(nn_bool, axis=1)
+#     num_needed = k - num_neighbors
+#     print(num_needed)
+#     nn_equal = distances == kth_smallest(distances, k)
+#     for i in range(nn_equal.shape[0]):
+#         true_indices = np.nonzero(nn_equal[i, :])[0]
+#         print(len(true_indices))
+#         if len(true_indices) > num_needed[i]:
+#             selected_indices = np.random.choice(true_indices, size=num_needed[i], replace=False)
+#             print(selected_indices)
+#             nn_bool[i, selected_indices] = True
+#         else:
+#             nn_bool[i, true_indices] = True
+#     return nn_bool, distances
+
+# def inverse_distance_sum(distances, index):
+#    return np.sum(1 / (distances + eps) * index, axis=1)
+
 def k_nearest_neighbors(data, query, k=1):
     tree = cKDTree(data)
     distances, indices = tree.query(query, k=k)
     return indices, distances
 
-def inverse_distance_sum(distances):
+def inverse_distance_sum(distances, indices):
     return np.sum(1 / (distances + eps), axis=1)
 
-def kth_nearest_neighbor_distance(X, Y, k=1, distance_type="euclidean"):
-    distances_matrix = distance.cdist(X, Y, distance_type)
-    k_nearest_indices = np.argpartition(distances_matrix, k-1, axis=1)[:, :k]
-    kth_distances = np.take_along_axis(distances_matrix, k_nearest_indices, axis=1)
-    distances = np.min(kth_distances, axis=1)
-    return distances
+def kth_nearest_neighbor_distance(data, query, k=1):
+    tree = cKDTree(data)
+    distances, indices = tree.query(query, k=k)
+    return indices, distances
 
 def approx_kl_div(p_samples: np.ndarray, q_samples: np.ndarray):
     """
@@ -79,8 +97,8 @@ def approx_kl_div(p_samples: np.ndarray, q_samples: np.ndarray):
 
 if __name__ == "__main__":
     X = np.zeros(5).reshape(-1, 1)
-    Y = np.arrange()
-    print(k_nearest_neighbors(X, Y, 1))
+    Y = np.arange(5).reshape(-1, 1)
+    print(kth_nearest_neighbor_distance(X, Y, 1))
 
 
 

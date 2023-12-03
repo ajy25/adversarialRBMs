@@ -467,8 +467,7 @@ class RBM(nn.Module):
         batch_size = h_sample.shape[0]
         if batch_size < k:
             return None
-        ind, _ = k_nearest_neighbors(self.adversary_memory, h_sample, k, 
-                                     'hamming')
+        ind, _ = k_nearest_neighbors(self.adversary_memory, h_sample, k)
         j = np.sum(ind >= batch_size, axis=1)
         return torch.Tensor(2 * j / k - 1)
     
@@ -492,10 +491,10 @@ class RBM(nn.Module):
             return None
         ind, distances = k_nearest_neighbors(self.adversary_memory,
                                              h_sample.numpy(), k)
-        ind_from_data = ind.copy()
-        ind_from_data[:, :batch_size] = False
-        return torch.Tensor(2 * inverse_distance_sum(distances, ind_from_data) \
-                            / inverse_distance_sum(distances, ind) - 1)
+        ind_data = ind[ind >= batch_size]
+        ind_model = ind[ind < batch_size]
+        return torch.Tensor(2 * inverse_distance_sum(distances, ind_data) \
+                            / inverse_distance_sum(distances, ind_model) - 1)
         
     def fit(self, X: np.ndarray, n_gibbs: int = 1,
             lr: float = 0.1, n_epochs: int = 100, batch_size: int = 10,
