@@ -6,6 +6,7 @@ from .util import (
     partition_into_batches, k_nearest_neighbors, inverse_distance_sum
 )
 torch.set_default_dtype(torch.float32)
+eps = np.finfo(np.float32).eps
 
 class ConditionalRBM(nn.Module):
     """Conditional Restricted Boltzmann Machine"""
@@ -242,6 +243,32 @@ class ConditionalRBM(nn.Module):
         return h @ self.W.t() + self.mu.forward(c)
     
     @torch.no_grad()
+    def metrics(self, v: np.ndarray, c: np.ndarray, n_gibbs: int = 10):
+        """
+        Returns the reconstruction MSE, KL(h_data || h_model), 
+        and KL(h_model || h_data), all as floats
+
+        @args
+        - v: np.array ~ (batch_size, n_vis)
+        - c: np.array ~ (batch_size, n_cond)
+
+        @returns 
+        - float << recon_mse
+        - float << kl_vdata_vmodel
+        - float << kl_vmodel_vdata
+        """
+        _, h_data = self._block_gibbs_sample(torch.Tensor(c), 
+                                torch.Tensor(v), n_gibbs=0)
+        v_model, h_model = self._block_gibbs_sample(torch.Tensor(c), 
+                                torch.Tensor(v), n_gibbs=n_gibbs)
+        h_data = h_data.numpy()
+        h_model = h_model.numpy()
+        kl_vdata_vmodel = self._approx_kl_div(h_data, h_model).item()
+        kl_vmodel_vdata = self._approx_kl_div(h_model, h_data).item()
+        recon_mse = torch.mean((v_model - v) ** 2).item()
+        return recon_mse, kl_vdata_vmodel, kl_vmodel_vdata
+
+    @torch.no_grad()
     def _reconstruction_MSE(self, v: torch.Tensor, c: torch.Tensor):
         """
         Computes the MSE loss of a reconstructed visible unit and an input
@@ -390,11 +417,15 @@ class ConditionalRBM(nn.Module):
             recon_loss_history = recon_loss
             if verbose_interval is not None:
                 if epoch % verbose_interval == 0:
-                    message = f"\repoch: {str(epoch).zfill(len(str(n_epochs)))}"
-                    message += f" of {n_epochs} |"
-                    message += f" recon_loss: {round(recon_loss.item(), 3)}"
-                    message += f" | cd_loss: {round(loss.item(), 3)}"
-                    print(message, end="\n")
+                    msg = f"\repoch: {str(epoch).zfill(len(str(n_epochs)))}"
+                    msg += f" of {n_epochs}"
+                    msg += f" | cd_loss: {round(loss.item(), 3)}"
+                    recon_mse, kl_vdata_vmodel, kl_vmodel_vdata \
+                        = self.metrics(batch[0], batch[1])
+                    msg += f" | recon_mse: {round(recon_mse, 3)}"
+                    msg += f" | kl_vdata_vmodel: {round(kl_vdata_vmodel, 3)}"
+                    msg += f" | kl_vmodel_vdata: {round(kl_vmodel_vdata, 3)}"
+                    print(msg, end="\n")
         if checkpoint_path is not None:
             metadata_path = ".".join(checkpoint_path.split(".")[:-1]) + \
                 ".json"

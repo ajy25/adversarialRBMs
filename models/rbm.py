@@ -3,7 +3,8 @@ import torch.nn as nn
 import numpy as np
 import json
 from .util import (
-    partition_into_batches, k_nearest_neighbors, inverse_distance_sum
+    partition_into_batches, k_nearest_neighbors, inverse_distance_sum, 
+    approx_kl_div
 )
 torch.set_default_dtype(torch.float32)
 
@@ -242,6 +243,30 @@ class RBM(nn.Module):
             v_sample, _ = self._block_gibbs_sample(v=v, n_gibbs=n_gibbs,
                                                     add_noise=add_noise)
         return v_sample.numpy()
+        
+    @torch.no_grad()
+    def metrics(self, v: np.ndarray, n_gibbs: int = 10):
+        """
+        Returns the reconstruction MSE, KL(h_data || h_model), 
+        and KL(h_model || h_data), all as floats
+
+        @args
+        - v: np.array ~ (batch_size, n_vis)
+
+        @returns 
+        - float << recon_mse
+        - float << kl_vdata_vmodel
+        - float << kl_vmodel_vdata
+        """
+        _, h_data = self._block_gibbs_sample(torch.Tensor(v), n_gibbs=0)
+        v_model, h_model = self._block_gibbs_sample(
+            torch.zeros_like(torch.Tensor(v)), n_gibbs=n_gibbs)
+        h_data = h_data.numpy()
+        h_model = h_model.numpy()
+        # kl_vdata_vmodel = self._approx_kl_div(h_data, h_model).item()
+        # kl_vmodel_vdata = self._approx_kl_div(h_model, h_data).item()
+        recon_mse = torch.mean((v_model - v) ** 2).item()
+        return recon_mse, 0, 0
 
     def cd_loss(self, v: np.ndarray, n_gibbs: int = 1, gamma: float = 1):
         """
@@ -465,8 +490,7 @@ class RBM(nn.Module):
         if batch_size < k:
             return None
         ind, distances = k_nearest_neighbors(self.adversary_memory,
-                                             h_sample.numpy(), k, 
-                                             'hamming')
+                                             h_sample.numpy(), k)
         ind_from_data = ind.copy()
         ind_from_data[:, :batch_size] = False
         return torch.Tensor(2 * inverse_distance_sum(distances, ind_from_data) \
@@ -599,10 +623,15 @@ class RBM(nn.Module):
             recon_loss_history = reconstruction_loss
             if verbose_interval is not None:
                 if epoch % verbose_interval == 0:
-                    message = f"\repoch: {str(epoch).zfill(len(str(n_epochs)))}"
-                    message += f" of {n_epochs} |"
-                    message += f" recon_loss: {reconstruction_loss}"
-                    print(message, end="\n")
+                    msg = f"\repoch: {str(epoch).zfill(len(str(n_epochs)))}"
+                    msg += f" of {n_epochs}"
+                    msg += f" | cd_loss: {round(loss.item(), 3)}"
+                    recon_mse, kl_data_model, kl_model_data \
+                        = self.metrics(batch[0])
+                    msg += f" | recon_mse: {round(recon_mse, 3)}"
+                    msg += f" | kl_data_model: {round(kl_data_model, 3)}"
+                    msg += f" | kl_model_data: {round(kl_model_data, 3)}"
+                    print(msg, end="\n")
         if checkpoint_path is not None:
             metadata_path = ".".join(checkpoint_path.split(".")[:-1]) + \
                 ".json"

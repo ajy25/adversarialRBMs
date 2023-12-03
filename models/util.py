@@ -1,5 +1,6 @@
 import numpy as np
-from scipy.spatial import distance
+from scipy.spatial import distance, cKDTree
+from scipy.stats import entropy
 
 eps = np.finfo(np.float32).eps
 
@@ -42,20 +43,44 @@ def partition_into_batches(data: list[np.ndarray], batch_size: int,
    return output, orig_idx
 
 def kth_smallest(matrix, k):
-   kth_values = np.partition(matrix, k, axis=1)[:,k]
+   kth_values = np.partition(matrix, k, axis=1)[:, k]
    return kth_values.reshape(-1, 1)
 
-def k_nearest_neighbors(data, query, k, distance_type='euclidean'):
-   distances = distance.cdist(query, data, distance_type)
-   nn_bool = distances <= kth_smallest(distances, k)
-   return nn_bool, distances
+def k_nearest_neighbors(data, query, k=1):
+    tree = cKDTree(data)
+    distances, indices = tree.query(query, k=k)
+    return indices, distances
 
-def inverse_distance_sum(distances, index):
-   return np.sum(1 / (distances + eps) * index, axis=1)
+def inverse_distance_sum(distances):
+    return np.sum(1 / (distances + eps), axis=1)
 
+def kth_nearest_neighbor_distance(X, Y, k=1, distance_type="euclidean"):
+    distances_matrix = distance.cdist(X, Y, distance_type)
+    k_nearest_indices = np.argpartition(distances_matrix, k-1, axis=1)[:, :k]
+    kth_distances = np.take_along_axis(distances_matrix, k_nearest_indices, axis=1)
+    distances = np.min(kth_distances, axis=1)
+    return distances
 
+def approx_kl_div(p_samples: np.ndarray, q_samples: np.ndarray):
+    """
+    Estimates KL(p || q) given samples from p and q, as described in equation 5 
+    of the 2009 paper on multi-dimensional KL divergence estimation, 
+    https://www.princeton.edu/~kulkarni/Papers/Journals/j068_2009_WangKulVer_TransIT.pdf
 
+    p_samples: np.array ~ (n, d)
+    q_samples: np.array ~ (m, d)
+    """
+    n = len(p_samples)
+    m = len(q_samples)
+    d = p_samples.shape[1]
+    nu = kth_nearest_neighbor_distance(p_samples, q_samples, k=1)
+    rho = kth_nearest_neighbor_distance(p_samples, q_samples, k=1)
+    return d * np.mean(np.log2(nu / rho)) + np.log2(m / n - 1)
 
+if __name__ == "__main__":
+    X = np.zeros(5).reshape(-1, 1)
+    Y = np.arrange()
+    print(k_nearest_neighbors(X, Y, 1))
 
 
 
