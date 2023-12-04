@@ -288,6 +288,7 @@ class RBM(nn.Module):
         v_model, h_model = self._block_gibbs_sample(v_data, 
                                                     n_gibbs=n_gibbs)
         L = self._energy(v_data, h_data) - self._energy(v_model, h_model)
+        # L = self._marginal_energy(v_data) - self._marginal_energy(v_model)
         if gamma == 1:
             return L.mean()
         A = self._weighted_neighbors_critic(h_model)
