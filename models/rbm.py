@@ -566,8 +566,15 @@ class RBM(nn.Module):
                     msg += f" of {n_epochs}"
                     metrics_idx = np.random.choice(len(X), min(100, len(X)), 
                                                    replace=False)
+                    data_subset = X[metrics_idx].copy()
+                    if contains_missing:
+                        missing_mask = np.isnan(data_subset)
+                        clamp = np.logical_not(missing_mask)
+                        data_subset[missing_mask] = 0
+                        data_subset = self.reconstruct(v=data_subset, 
+                            clamp=clamp, random_init=False, n_gibbs=n_gibbs)
                     recon_mse, kl_data_model, kl_model_data \
-                        = self.metrics(X[metrics_idx], n_gibbs=n_gibbs)
+                        = self.metrics(data_subset, n_gibbs=n_gibbs)
                     msg += f" | recon_mse: {round(recon_mse, 3)}"
                     msg += f" | kl_data_model: {round(kl_data_model, 3)}"
                     msg += f" | kl_model_data: {round(kl_model_data, 3)}"
@@ -576,6 +583,10 @@ class RBM(nn.Module):
                     stats['recon_mse'].append(recon_mse)
                     stats['kl_data_model'].append(kl_data_model)
                     stats['kl_model_data'].append(kl_model_data)
+                    # grad_msg = ""
+                    # for name, param in self.named_parameters():
+                    #     grad_msg += f"{name}: {param.grad}"
+                    # print(grad_msg)
         if checkpoint_path is not None:
             metadata_path = ".".join(checkpoint_path.split(".")[:-1]) + \
                 ".json"
@@ -650,8 +661,15 @@ class RBM(nn.Module):
                     msg += f" of {n_epochs}"
                     metrics_idx = np.random.choice(len(X), min(100, len(X)), 
                                                    replace=False)
+                    data_subset = X[metrics_idx].copy()
+                    if contains_missing:
+                        missing_mask = np.isnan(data_subset)
+                        clamp = np.logical_not(missing_mask)
+                        data_subset[missing_mask] = 0
+                        data_subset = self.reconstruct(v=data_subset, 
+                            clamp=clamp, random_init=False, n_gibbs=n_gibbs)
                     recon_mse, kl_data_model, kl_model_data \
-                        = self.metrics(X[metrics_idx], n_gibbs=n_gibbs)
+                        = self.metrics(data_subset, n_gibbs=n_gibbs)
                     msg += f" | loss: {round(loss.item(), 3)}"
                     msg += f" | recon_mse: {round(recon_mse, 3)}"
                     msg += f" | kl_data_model: {round(kl_data_model, 3)}"
@@ -661,6 +679,11 @@ class RBM(nn.Module):
                     stats['recon_mse'].append(recon_mse)
                     stats['kl_data_model'].append(kl_data_model)
                     stats['kl_model_data'].append(kl_model_data)
+                    grad_msg = ""
+                    for name, param in self.named_parameters():
+                        grad_msg += f"{name}: {param.grad}"
+                    print(grad_msg)
+
             # if checkpoint_path is not None:
             #     metadata_path = os.path.splitext(checkpoint_path)[0] + f"-{epoch}" + ".json"
             #     newpath = os.path.splitext(checkpoint_path)[0] + f"-{epoch}" + ".pth"
