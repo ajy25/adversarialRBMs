@@ -48,9 +48,9 @@ def kth_smallest(matrix, k):
 def k_nearest_neighbors2(data, query, k):
     distances = distance.cdist(query, data, 'euclidean')
     nn_bool = distances < kth_smallest(distances, k)
-    num_neighbors = np.sum(nn_bool, axis=1)
-    num_needed = k - num_neighbors
-    nn_equal = distances == kth_smallest(distances, k)
+    # num_neighbors = np.sum(nn_bool, axis=1)
+    # num_needed = k - num_neighbors
+    # nn_equal = distances == kth_smallest(distances, k)
     # for i in range(nn_equal.shape[0]):
     #     true_indices = np.nonzero(nn_equal[i, :])[0]
     #     if len(true_indices) > num_needed[i]:

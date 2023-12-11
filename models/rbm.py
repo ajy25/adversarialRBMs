@@ -148,7 +148,8 @@ class RBM(nn.Module):
     @torch.no_grad()
     def _block_gibbs_sample(self, v: torch.Tensor = None,
                             h: torch.Tensor = None, clamp: torch.Tensor = None,
-                            n_gibbs = 1, add_noise = True):
+                            n_gibbs = 1, add_noise = True, 
+                            begin_from_random_init = False):
         """
         Familiar block Gibbs sampling method of visible and hidden units.
 
@@ -161,6 +162,8 @@ class RBM(nn.Module):
             reconstruct elements marked False in the boolean mask
         - n_gibbs: int << number of Gibbs sampling steps
         - add_noise: bool << adds noise to the visible units
+        - begin_from_random_init: bool << if True, v_0 is drawn from randn
+            with similar shape as v
 
         @returns
         - torch.Tensor ~ (batch_size, n_vis)
@@ -174,7 +177,11 @@ class RBM(nn.Module):
         elif v is None:
             v_sample = self._prob_v_given_h(h)
         else:
-            v_sample = v.clone()
+            if begin_from_random_init:
+                v_sample = torch.randn(size=(v.shape[0], v.shape[1]), 
+                                       generator=self.rng)
+            else:
+                v_sample = v.clone()
         m = v_sample.shape[0]
         h_sample = torch.bernoulli(self._prob_h_given_v(v_sample),
                                     generator=self.rng)
@@ -191,6 +198,7 @@ class RBM(nn.Module):
                                         generator=self.rng)
         return v_sample, h_sample
 
+    @torch.no_grad()
     def _variance(self):
         """
         Returns the variance; we only attempt to train the log variance.
@@ -267,7 +275,7 @@ class RBM(nn.Module):
         recon_mse = self._reconstruction_MSE(torch.Tensor(v)).item()
         return recon_mse, kl_vdata_vmodel, kl_vmodel_vdata
 
-    def cd_loss(self, v: np.ndarray, n_gibbs: int = 1, gamma: float = 1):
+    def cd_loss(self, v: np.ndarray, n_gibbs: int = 1):
         """
         Computes the contrastive divergence loss with which parameters may be
         updated via an optimizer. Follows Algorithm 3 of
@@ -278,7 +286,6 @@ class RBM(nn.Module):
         @args
         - v: np.array ~ (batch_size, n_vis)
         - n_gibbs: int
-        - gamma: float << weight of the non-adversarial loss component
 
         @returns
         - torch.Tensor ~ (1) << contrastive divergence loss
@@ -288,15 +295,7 @@ class RBM(nn.Module):
         v_model, h_model = self._block_gibbs_sample(torch.rand_like(v_data), 
                                                     n_gibbs=n_gibbs)
         L = self._energy(v_data, h_data) - self._energy(v_model, h_model)
-        # L = self._marginal_energy(v_data) - self._marginal_energy(v_model)
-        if gamma == 1:
-            return L.mean()
-        A = self._weighted_neighbors_critic(h_model)
-        if A is None:
-            return L.mean()
-        else:
-            A = torch.mean(A)
-        return gamma * L.mean() + (1 - gamma) * A
+        return L.mean()
 
     @torch.no_grad()
     def _energy_grad_param(self, v: torch.Tensor, h: torch.Tensor):
@@ -320,7 +319,7 @@ class RBM(nn.Module):
         grad["mu"] = ((self.mu - v) / var).mean(dim=0)
         grad["log_var"] = (-0.5 * (v - self.mu)**2 / var +
                             ((v / var) * h.mm(self.W.T))).mean(dim=0)
-        return grad     
+        return grad
 
     @torch.no_grad()
     def _energy_grad_param_no_avg(self, v: torch.Tensor, h: torch.Tensor):
