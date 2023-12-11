@@ -4,40 +4,16 @@ import torch.utils.data
 import numpy as np
 import json
 from .util import (
-    partition_into_batches, k_nearest_neighbors, inverse_distance_sum, 
-    approx_kl_div
+    partition_into_batches, approx_kl_div
 )
 torch.set_default_dtype(torch.float32)
 eps = np.finfo(np.float32).eps
 
-class Classifier(nn.Module):
-    def __init__(self, input_size):
-        super().__init__()
-        self.fc = nn.Linear(input_size, 1)
-        self.sigmoid = nn.Sigmoid()
-    def forward(self, x):
-        x = self.fc(x)
-        x = self.sigmoid(x)
-        return x
-    def fit(self, x, y, num_epochs=10, lr=0.001):
-        criterion = nn.BCELoss()
-        optimizer = torch.optim.Adam(self.parameters(), lr=lr)
-        dataset = torch.utils.data.TensorDataset(x, y)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=10, 
-                                                 shuffle=True)
-        for _ in range(num_epochs):
-            for batch_data, batch_labels in dataloader:
-                optimizer.zero_grad()
-                outputs = self(batch_data)
-                loss = criterion(outputs, batch_labels.float().view(-1, 1))
-                loss.backward()
-                optimizer.step()
 
 class ConditionalRBM(nn.Module):
     """Conditional Restricted Boltzmann Machine"""
 
-    def __init__(self, n_vis: int, n_hid: int, n_cond: int, 
-                 var: float = None):
+    def __init__(self, n_vis: int, n_hid: int, n_cond: int):
         """
         Constructs a Gaussian-Bernoulli Conditional Restricted Boltzmann 
         Machine.
@@ -46,15 +22,12 @@ class ConditionalRBM(nn.Module):
         - n_vis: int << number of visible nodes
         - n_hid: int << number of hidden nodes
         - n_cond: int << number of conditional nodes
-        - var: float | None << set variance for each visible node;
-            if None, we learn the variance on each visible node
         """
         super().__init__()
         self.rng = torch.Generator()
         self.reset_seed(42)
         self.adversary_memory = None
-        self.reset_hyperparameters(n_vis=n_vis, n_hid=n_hid, n_cond=n_cond,
-                                   var=var)
+        self.reset_hyperparameters(n_vis=n_vis, n_hid=n_hid, n_cond=n_cond)
 
     def metadata(self):
         """
@@ -66,27 +39,22 @@ class ConditionalRBM(nn.Module):
         metadata = {
             "n_vis": self.n_vis,
             "n_hid": self.n_hid,
-            "n_cond": self.n_cond,
-            "var": self.var
+            "n_cond": self.n_cond
         }
         return metadata
     
     def reset_hyperparameters(self, n_vis: int = None, n_hid: int = None, 
-                              n_cond: int = None, var: float = None):
+                              n_cond: int = None):
         if n_vis is not None:
             self.n_vis = n_vis
         if n_hid is not None:
             self.n_hid = n_hid
         if n_cond is not None:
             self.n_cond = n_cond
-        self.var = var
         self.W = nn.Parameter(torch.Tensor(self.n_vis, self.n_hid))
         self.mu = nn.Linear(self.n_cond, self.n_vis, bias=True)
         self.b = nn.Linear(self.n_cond, self.n_hid, bias=True)
-        if self.var is None:
-            self.log_var = nn.Parameter(torch.Tensor(self.n_vis))
-        else:
-            self.log_var = torch.ones((self.n_vis)) * np.log(var)
+        self.log_var = nn.Linear(self.n_cond, self.n_vis, bias=True)
         self.reset_parameters()
 
     def reset_parameters(self, seed: int = 42):
@@ -97,8 +65,7 @@ class ConditionalRBM(nn.Module):
         nn.init.xavier_normal_(self.W)
         self.mu.reset_parameters()
         self.b.reset_parameters()
-        if self.var is None:
-            nn.init.constant_(self.log_var, 0)
+        self.log_var.reset_parameters()
 
     def reset_seed(self, seed: int):
         """
@@ -109,7 +76,7 @@ class ConditionalRBM(nn.Module):
         """
         self.rng.manual_seed(seed)
 
-    def _variance(self):
+    def _variance(self, c):
         """
         Returns the variance; we only attempt to train the log variance.
 
@@ -119,7 +86,7 @@ class ConditionalRBM(nn.Module):
         @returns
         - torch.Tensor | float
         """
-        return torch.exp(self.log_var)
+        return torch.exp(self.log_var.forward(c))
 
     def _energy(self, v: torch.Tensor, c: torch.Tensor, h: torch.Tensor):
         """
@@ -133,7 +100,7 @@ class ConditionalRBM(nn.Module):
         @returns
         - float
         """
-        var = self._variance()
+        var = self._variance(c)
         pos = torch.sum(0.5 * (v - self.mu.forward(c)) ** 2 / var, dim=1)
         neg = torch.sum(((v / var) @ (self.W)) * h, dim=1) + \
             torch.sum(h * self.b.forward(c), dim=1)
@@ -150,7 +117,7 @@ class ConditionalRBM(nn.Module):
         @returns
         - torch.Tensor
         """
-        var = self._variance()
+        var = self._variance(c)
         pos = torch.sum(torch.square(0.5 * (v - self.mu.forward(c)) \
                                      / var.sqrt()), dim=1)
         softmax_logit = ((v / var) @ self.W + self.b.forward(c)).clip(max=80)
@@ -192,7 +159,7 @@ class ConditionalRBM(nn.Module):
     @torch.no_grad()
     def _block_gibbs_sample(self, c: torch.Tensor, v: torch.Tensor = None, 
                             h: torch.Tensor = None, clamp: torch.Tensor = None,
-                            n_gibbs = 1, add_noise = False):
+                            n_gibbs = 1, add_noise = True):
         """
         Familiar block Gibbs sampling method of visible and hidden units.
 
@@ -211,7 +178,7 @@ class ConditionalRBM(nn.Module):
         - torch.Tensor ~ (batch_size, n_vis)
         - torch.Tensor ~ (batch_size, n_hid)
         """
-        std = self._variance().sqrt()
+        std = self._variance(c).sqrt()
         if clamp is not None:
             clamp = clamp.bool()
         if v is None and h is None:
@@ -249,7 +216,7 @@ class ConditionalRBM(nn.Module):
         @returns
         - torch.Tensor ~ (batch_size, n_hid)
         """
-        return torch.sigmoid((v / self._variance()) @ self.W + self.b.forward(c))
+        return torch.sigmoid((v / self._variance(c)) @ self.W + self.b.forward(c))
     
     @torch.no_grad()
     def _prob_h_given_v(self, v: torch.Tensor, c: torch.Tensor):
@@ -265,7 +232,7 @@ class ConditionalRBM(nn.Module):
         @returns
         - torch.Tensor ~ (batch_size, n_hid)
         """
-        return torch.sigmoid((v / self._variance()) @ self.W + self.b.forward(c))
+        return torch.sigmoid((v / self._variance(c)) @ self.W + self.b.forward(c))
 
     @torch.no_grad()
     def _prob_v_given_h(self, h: torch.Tensor, c: torch.Tensor):
@@ -324,7 +291,7 @@ class ConditionalRBM(nn.Module):
         return torch.mean((v_bar - v) ** 2)
 
     def cd_loss(self, v: np.ndarray, c: np.ndarray, 
-                n_gibbs: int = 1, gamma: float = 1):
+                n_gibbs: int = 1):
         """
         Computes the contrastive divergence loss with which parameters may be
         updated via an optimizer. Follows Algorithm 3 of
@@ -336,47 +303,18 @@ class ConditionalRBM(nn.Module):
         - v: np.array ~ (batch_size, n_vis)
         - c: np.array ~ (batch_size, n_cond)
         - n_gibbs: int
-        - gamma: float << weight of the non-adversarial loss component
 
         @returns
         - torch.Tensor ~ (1) << contrastive divergence loss
         """
         v_data: torch.Tensor = torch.Tensor(v)
         c: torch.Tensor = torch.Tensor(c)
-        v_model, h_model = self._block_gibbs_sample(c, v_data, n_gibbs=n_gibbs)
-        L = self._marginal_energy(v_data, c) - self._marginal_energy(v_model, c)
-        h_model_w_grad = self._prob_h_given_v_with_grad(v_model, c)
-        A = self._experimental_critic(h_model_w_grad)
-        if A is None:
-            A = 0
-        else:
-            A = torch.mean(A)
-        return gamma * L.mean() + (1 - gamma) * A
-    
-    @torch.no_grad()
-    def _weighted_neighbors_critic(self, h_sample: torch.Tensor, k=5):
-        """
-        Weightest nearest neighbors linear critic, as described in 
-        https://arxiv.org/abs/1804.08682. 
-
-        @args
-        - h_sample: torch.Tensor ~ (batch_size, n_hid)
-        - k: int << the k in k-nearest neighbors
-
-        @returns
-        - torch.Tensor ~ (batch_size)
-        """
-        if self.adversary_memory is None:
-            return None
-        batch_size = h_sample.shape[0]
-        if batch_size < k:
-            return None
-        ind, distances = k_nearest_neighbors(self.adversary_memory,
-                                             h_sample.detach().numpy(), k)
-        ind_from_data = ind.copy()
-        ind_from_data[:, :batch_size] = False
-        return torch.Tensor(2 * inverse_distance_sum(distances, ind_from_data) \
-                            / inverse_distance_sum(distances, ind) - 1)
+        _, h_data = self._block_gibbs_sample(c, v_data, 
+                                              n_gibbs=0)
+        v_model, h_model = self._block_gibbs_sample(c, torch.randn_like(v_data), 
+                                              n_gibbs=n_gibbs)
+        L = self._energy(v_data, c, h_data) - self._energy(v_model, c, h_model)
+        return L.mean()
     
     def _experimental_critic(self, h_sample: torch.Tensor, k=5):
         """
@@ -396,51 +334,8 @@ class ConditionalRBM(nn.Module):
             j = torch.sum(self.adversary_memory(h_sample) >= 0.5)
         return torch.Tensor(j / batch_size - 1)
     
-    @torch.no_grad()
-    def _update_adversary_memory(self, v: np.ndarray, c: np.ndarray, 
-                                 n_gibbs = 10):
-        """
-        Re-caches a minibatch of visible units drawn from the data and visible
-        units drawn from the model, as described in 
-        https://arxiv.org/abs/1804.08682. 
-
-        @args
-        - v: np.array ~ (batch_size, n_vis)
-        - c: np.array ~ (batch_size, n_cond)
-        - n_gibbs: int << number of Gibbs sampling steps to sample from model
-        """
-        v_data = torch.Tensor(v)
-        c = torch.Tensor(c)
-        _, h_data = self._block_gibbs_sample(c, v_data, n_gibbs=0)
-        _, h_model = self._block_gibbs_sample(c, v_data, n_gibbs=n_gibbs)
-        self.adversary_memory = np.vstack((h_model.numpy(), h_data.numpy()))
-
-    @torch.no_grad()
-    def _update_adversary_experimental(self, v: np.ndarray, c: np.ndarray, 
-                                 n_gibbs = 10):
-        """
-        Re-caches a minibatch of visible units drawn from the data and visible
-        units drawn from the model, as described in 
-        https://arxiv.org/abs/1804.08682. 
-
-        @args
-        - v: np.array ~ (batch_size, n_vis)
-        - c: np.array ~ (batch_size, n_cond)
-        - n_gibbs: int << number of Gibbs sampling steps to sample from model
-        """
-        v_data = torch.Tensor(v)
-        c = torch.Tensor(c)
-        _, h_data = self._block_gibbs_sample(c, v_data, n_gibbs=0)
-        _, h_model = self._block_gibbs_sample(c, v_data, n_gibbs=n_gibbs)
-        x = np.vstack((h_model.numpy(), h_data.numpy()))
-        y = np.vstack((np.zeros_like(h_model.numpy(), 
-                        np.ones_like(h_data.numpy()))))
-        self.adversary_memory = Classifier(input_size=v.shape[0])
-        self.adversary_memory.fit(x, y)
-    
     def fit_autograd(self, X: np.ndarray, y: np.ndarray, n_gibbs: int = 1,
             lr: float = 0.1, n_epochs: int = 1, batch_size: int = 1,
-            gamma: float = 1.0, gamma_delay: int = 10, 
             fail_tol: int = None, rng_seed: int = 0, 
             verbose_interval: int = None, reduce_lr_on_plateau = False, 
             checkpoint_path = None):
@@ -470,9 +365,6 @@ class ConditionalRBM(nn.Module):
             self.train()
             batched_train_data, _ = partition_into_batches([X, y], \
                 batch_size, rng_seed + epoch)
-            if epoch >= gamma_delay and gamma < 1:
-                    self._update_adversary_experimental(batch[0], batch[1],
-                                                    n_gibbs=10)
             for batch in batched_train_data:
                 if contains_missing:
                     missing_mask = np.isnan(batch[0])
@@ -485,10 +377,7 @@ class ConditionalRBM(nn.Module):
                     self._reconstruction_MSE(torch.Tensor(batch[0]), 
                                              torch.Tensor(batch[1]))
                 optimizer.zero_grad()
-                if epoch >= gamma_delay and gamma < 1:
-                    loss = self.cd_loss(batch[0], batch[1], n_gibbs, gamma)
-                else:
-                    loss = self.cd_loss(batch[0], batch[1], n_gibbs)
+                loss = self.cd_loss(batch[0], batch[1], n_gibbs)
                 loss.backward()
                 optimizer.step()
                 recon_loss += batch_train_recon
@@ -543,8 +432,7 @@ def load(checkpoint_path: str, metadata_path: str = None) -> ConditionalRBM:
     with open(metadata_path, "r") as json_file:
         metadata = json.load(json_file)
     model = ConditionalRBM(
-        metadata["n_vis"], metadata["n_hid"], metadata["n_cond"], 
-        metadata["var"]
+        metadata["n_vis"], metadata["n_hid"], metadata["n_cond"]
     )
     model.load_state_dict(torch.load(checkpoint_path))
     return model

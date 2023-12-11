@@ -285,7 +285,7 @@ class RBM(nn.Module):
         """
         v_data: torch.Tensor = torch.Tensor(v)
         _, h_data = self._block_gibbs_sample(v_data, n_gibbs=0)
-        v_model, h_model = self._block_gibbs_sample(v_data, 
+        v_model, h_model = self._block_gibbs_sample(torch.rand_like(v_data), 
                                                     n_gibbs=n_gibbs)
         L = self._energy(v_data, h_data) - self._energy(v_model, h_model)
         # L = self._marginal_energy(v_data) - self._marginal_energy(v_model)
@@ -679,10 +679,10 @@ class RBM(nn.Module):
                     stats['recon_mse'].append(recon_mse)
                     stats['kl_data_model'].append(kl_data_model)
                     stats['kl_model_data'].append(kl_model_data)
-                    grad_msg = ""
-                    for name, param in self.named_parameters():
-                        grad_msg += f"{name}: {param.grad}"
-                    print(grad_msg)
+                    # grad_msg = ""
+                    # for name, param in self.named_parameters():
+                    #     grad_msg += f"{name}: {param.grad}"
+                    # print(grad_msg)
 
             # if checkpoint_path is not None:
             #     metadata_path = os.path.splitext(checkpoint_path)[0] + f"-{epoch}" + ".json"
