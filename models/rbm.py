@@ -149,7 +149,7 @@ class RBM(nn.Module):
     def _block_gibbs_sample(self, v: torch.Tensor = None,
                             h: torch.Tensor = None, clamp: torch.Tensor = None,
                             n_gibbs = 1, add_noise = True, 
-                            begin_from_random_init = False):
+                            begin_from_randn_init = True):
         """
         Familiar block Gibbs sampling method of visible and hidden units.
 
@@ -162,7 +162,7 @@ class RBM(nn.Module):
             reconstruct elements marked False in the boolean mask
         - n_gibbs: int << number of Gibbs sampling steps
         - add_noise: bool << adds noise to the visible units
-        - begin_from_random_init: bool << if True, v_0 is drawn from randn
+        - begin_from_randn_init: bool << if True, v_0 is drawn from randn
             with similar shape as v
 
         @returns
@@ -177,7 +177,7 @@ class RBM(nn.Module):
         elif v is None:
             v_sample = self._prob_v_given_h(h)
         else:
-            if begin_from_random_init:
+            if begin_from_randn_init and n_gibbs > 0:
                 v_sample = torch.randn(size=(v.shape[0], v.shape[1]), 
                                        generator=self.rng)
             else:
@@ -226,7 +226,7 @@ class RBM(nn.Module):
   
     @torch.no_grad()
     def reconstruct(self, v: np.ndarray, clamp: np.ndarray = None,
-                    random_init = True, n_gibbs: int = 1, add_noise=True):
+                    randn_init = True, n_gibbs: int = 1, add_noise=True):
         """
         Reconstructs the visible units.
 
@@ -234,23 +234,20 @@ class RBM(nn.Module):
         - v: np.array ~ (batch_size, n_vis)
         - clamp: boolean np.array ~ (batch_size, n_vis) << will only
             reconstruct elements marked False in the boolean mask
-        - random_init: bool << if True, reset v via torch.randn
+        - randn_init: bool << if True, reset v via torch.randn
         - n_gibbs: int
 
         @returns
         - np.array ~ (batch_size, n_vis)
         """
-        if random_init:
-            v = torch.randn(v.shape, generator=self.rng).requires_grad_(False)
-        else:
-            v = torch.Tensor(v).requires_grad_(False)
+        v = torch.Tensor(v).requires_grad_(False)
         if clamp is not None:
             v_sample, _ = self._block_gibbs_sample(v=v, n_gibbs=n_gibbs,
-                                                    clamp=torch.Tensor(clamp),
-                                                    add_noise=add_noise)
+                clamp=torch.Tensor(clamp), add_noise=add_noise,
+                begin_from_randn_init=randn_init)
         else:
             v_sample, _ = self._block_gibbs_sample(v=v, n_gibbs=n_gibbs,
-                                                    add_noise=add_noise)
+                add_noise=add_noise, begin_from_randn_init=randn_init)
         return v_sample.numpy()
         
     @torch.no_grad()
@@ -270,8 +267,8 @@ class RBM(nn.Module):
         v_model, _ = self._block_gibbs_sample(torch.Tensor(v), 
                                               n_gibbs=n_gibbs)
         v_model = v_model.numpy()
-        kl_vdata_vmodel = approx_kl_div(v, v_model)
-        kl_vmodel_vdata = approx_kl_div(v_model, v)
+        kl_vdata_vmodel = approx_kl_div(v, v_model, k=5)
+        kl_vmodel_vdata = approx_kl_div(v_model, v, k=5)
         recon_mse = self._reconstruction_MSE(torch.Tensor(v)).item()
         return recon_mse, kl_vdata_vmodel, kl_vmodel_vdata
 
@@ -378,9 +375,9 @@ class RBM(nn.Module):
         pos_grad = self._energy_grad_param_no_avg(v_data, h_data)
         neg_grad = self._energy_grad_param_no_avg(v_model, h_model)
         grad = {}
+        critic = self._nearest_neighbors_critic(h_model)
         for key in pos_grad.keys():
             grad[key] = torch.mean(pos_grad[key] - neg_grad[key], dim=0)
-            critic = self._nearest_neighbors_critic(h_model)
             if critic is not None:
                 grad[key] = gamma * grad[key] + (1 - gamma) * \
                     self._adversarial_grad(critic, neg_grad[key])
@@ -512,7 +509,7 @@ class RBM(nn.Module):
         - lr: float << learning rate
         - n_epochs: int << number of epochs
         - batch_size: int
-        - gamma: float << proportion of loss coming from the 
+        - gamma: float << proportion of loss coming from the CD-k loss
         """
         stats = {
             'epoch_num': [],
@@ -541,7 +538,7 @@ class RBM(nn.Module):
                     clamp = np.logical_not(missing_mask)
                     batch[0][missing_mask] = 0
                     batch[0] = self.reconstruct(v=batch[0], clamp=clamp,
-                                             random_init=False, n_gibbs=n_gibbs)
+                                             randn_init=False, n_gibbs=n_gibbs)
                 if epoch >= gamma_delay and gamma < 1:
                     self._update_adversary_memory(batch[0])
                 optimizer.zero_grad()
@@ -571,7 +568,7 @@ class RBM(nn.Module):
                         clamp = np.logical_not(missing_mask)
                         data_subset[missing_mask] = 0
                         data_subset = self.reconstruct(v=data_subset, 
-                            clamp=clamp, random_init=False, n_gibbs=n_gibbs)
+                            clamp=clamp, randn_init=False, n_gibbs=n_gibbs)
                     recon_mse, kl_data_model, kl_model_data \
                         = self.metrics(data_subset, n_gibbs=n_gibbs)
                     msg += f" | recon_mse: {round(recon_mse, 3)}"
@@ -582,10 +579,6 @@ class RBM(nn.Module):
                     stats['recon_mse'].append(recon_mse)
                     stats['kl_data_model'].append(kl_data_model)
                     stats['kl_model_data'].append(kl_model_data)
-                    # grad_msg = ""
-                    # for name, param in self.named_parameters():
-                    #     grad_msg += f"{name}: {param.grad}"
-                    # print(grad_msg)
         if checkpoint_path is not None:
             metadata_path = ".".join(checkpoint_path.split(".")[:-1]) + \
                 ".json"
@@ -596,7 +589,6 @@ class RBM(nn.Module):
 
     def fit_autograd(self, X: np.ndarray, n_gibbs: int = 1,
             lr: float = 0.1, n_epochs: int = 1, batch_size: int = 1,
-            gamma: float = 1.0, gamma_delay: int = 10, 
             fail_tol: int = None, rng_seed: int = 0, 
             verbose_interval: int = None, reduce_lr_on_plateau = False, 
             checkpoint_path = None):
@@ -631,17 +623,11 @@ class RBM(nn.Module):
                     clamp = np.logical_not(missing_mask)
                     batch[0][missing_mask] = 0
                     batch[0] = self.reconstruct(v=batch[0], clamp=clamp,
-                                             random_init=False, n_gibbs=n_gibbs)
-                if epoch >= gamma_delay and gamma < 1:
-                    self._update_adversary_memory(batch[0],
-                                                    n_gibbs=10)
+                                             randn_init=False, n_gibbs=n_gibbs)
                 batch_train_recon = \
                     self._reconstruction_MSE(torch.Tensor(batch[0]))
                 optimizer.zero_grad()
-                if epoch >= gamma_delay and gamma < 1:
-                    loss = self.cd_loss(batch[0], n_gibbs, gamma)
-                else:
-                    loss = self.cd_loss(batch[0], n_gibbs)
+                loss = self.cd_loss(batch[0], n_gibbs)
                 loss.backward()
                 optimizer.step()
                 reconstruction_loss += batch_train_recon
@@ -666,7 +652,7 @@ class RBM(nn.Module):
                         clamp = np.logical_not(missing_mask)
                         data_subset[missing_mask] = 0
                         data_subset = self.reconstruct(v=data_subset, 
-                            clamp=clamp, random_init=False, n_gibbs=n_gibbs)
+                            clamp=clamp, randn_init=False, n_gibbs=n_gibbs)
                     recon_mse, kl_data_model, kl_model_data \
                         = self.metrics(data_subset, n_gibbs=n_gibbs)
                     msg += f" | loss: {round(loss.item(), 3)}"
@@ -678,23 +664,13 @@ class RBM(nn.Module):
                     stats['recon_mse'].append(recon_mse)
                     stats['kl_data_model'].append(kl_data_model)
                     stats['kl_model_data'].append(kl_model_data)
-                    # grad_msg = ""
-                    # for name, param in self.named_parameters():
-                    #     grad_msg += f"{name}: {param.grad}"
-                    # print(grad_msg)
-
-            # if checkpoint_path is not None:
-            #     metadata_path = os.path.splitext(checkpoint_path)[0] + f"-{epoch}" + ".json"
-            #     newpath = os.path.splitext(checkpoint_path)[0] + f"-{epoch}" + ".pth"
-            #     torch.save(self.state_dict(), newpath)
-            #     with open(metadata_path, "w") as json_file:
-            #         json.dump(self.metadata(), json_file)
         if checkpoint_path is not None:
             metadata_path = os.path.splitext(checkpoint_path)[0] + ".json"
             torch.save(self.state_dict(), checkpoint_path)
             with open(metadata_path, "w") as json_file:
                 json.dump(self.metadata(), json_file)
         return stats
+
 
 def load(checkpoint_path: str, metadata_path: str = None) -> RBM:
     """
