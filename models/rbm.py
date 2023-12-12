@@ -3,7 +3,7 @@ import torch.nn as nn
 import numpy as np
 import json
 import os
-from .util import (
+from .util_rbm import (
     partition_into_batches, k_nearest_neighbors, inverse_distance_sum, 
     approx_kl_div
 )

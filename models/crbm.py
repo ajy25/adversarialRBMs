@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.utils.data
 import numpy as np
 import json
-from .util import (
+from .util_crbm import (
     partition_into_batches, approx_kl_div
 )
 torch.set_default_dtype(torch.float32)
