@@ -3,6 +3,9 @@ import torch.nn as nn
 import numpy as np
 import json
 import os
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
 from .util_rbm import (
     partition_into_batches, k_nearest_neighbors, inverse_distance_sum, 
     approx_kl_div
@@ -16,7 +19,7 @@ class RBM(nn.Module):
     described in https://arxiv.org/abs/1804.08682. 
     """
 
-    def __init__(self, n_vis: int, n_hid: int, var: float = None, n_gan: int = None):
+    def __init__(self, n_vis: int, n_hid: int, var: float = None):
         """
         Constructs a Gaussian-Bernoulli Restricted Boltzmann Machine with 
         adversarial training on hidden units.
@@ -24,14 +27,13 @@ class RBM(nn.Module):
         @args
         - n_vis: int << number of visible nodes
         - n_hid: int << number of hidden nodes
-        - n_gan: int << number of gan nodes
         - var: float | None << set variance for each visible node;
             if None, we learn the variance on each visible node
         """
         super().__init__()
         self.rng = torch.Generator()
         self.reset_seed(42)
-        self.reset_hyperparameters(n_vis=n_vis, n_hid=n_hid, var=var, n_gan=n_gan)
+        self.reset_hyperparameters(n_vis=n_vis, n_hid=n_hid, var=var)
 
     def metadata(self):
         """
@@ -43,13 +45,12 @@ class RBM(nn.Module):
         metadata = {
             "n_vis": self.n_vis,
             "n_hid": self.n_hid,
-            "n_gan": self.n_gan,
             "var": self.var
         }
         return metadata
     
     def reset_hyperparameters(self, n_vis: int = None, n_hid: int = None, 
-                              var: float = None, n_gan: int = None):
+                              var: float = None):
         if n_vis is not None:
             self.n_vis = n_vis
         if n_hid is not None:
@@ -62,11 +63,7 @@ class RBM(nn.Module):
             self.log_var = nn.Parameter(torch.Tensor(self.n_vis))
         else:
             self.log_var = torch.ones((self.n_vis)) * np.log(var)
-        if n_gan is not None:
-            self.n_gan = n_gan
-        # change h->v
-        self.G1 = nn.Parameter(torch.Tensor(self.n_vis, self.n_gan))
-        self.G2 = nn.Parameter(torch.Tensor(self.n_gan, 1))
+        self.critic = make_pipeline(StandardScaler(), SVC(gamma='auto'))
         self.reset_parameters()
 
     def reset_parameters(self, seed: int = 42):
@@ -77,8 +74,6 @@ class RBM(nn.Module):
         nn.init.xavier_normal_(self.W)
         nn.init.constant_(self.mu, 0)
         nn.init.constant_(self.b, 0)
-        nn.init.xavier_normal_(self.G1)
-        nn.init.xavier_normal_(self.G2)
         if self.var is None:
             nn.init.constant_(self.log_var, 0)
 
@@ -301,25 +296,6 @@ class RBM(nn.Module):
                                                     n_gibbs=n_gibbs)
         L = self._energy(v_data, h_data) - self._energy(v_model, h_model)
         return L.mean()
-
-    def gan_loss(self, v: np.ndarray, n_gibbs: int = 1):
-        """
-        @args
-        - v: np.array ~ (batch_size, n_vis)
-        - n_gibbs: int
-
-        @returns
-        - torch.Tensor ~ (1) << gan loss
-        """
-        v_data: torch.Tensor = torch.Tensor(v)
-        _, h_data = self._block_gibbs_sample(v_data, n_gibbs=0)
-        v_model, h_model = self._block_gibbs_sample(torch.rand_like(v_data), n_gibbs=n_gibbs)
-        # change h->v
-        logits = (self._gan_forward(v_data) + 1)/2
-        L_data = torch.binary_cross_entropy_with_logits(logits, np.ones_like(logits))
-        logits = (self._gan_forward(v_model) + 1)/2
-        L_model = torch.binary_cross_entropy_with_logits(logits, np.zeros_like(logits))
-        return (L_data + L_model)/2.
         
     @torch.no_grad()
     def _energy_grad_param(self, v: torch.Tensor, h: torch.Tensor):
@@ -367,9 +343,6 @@ class RBM(nn.Module):
         grad["mu"] = ((self.mu - v) / var)
         grad["log_var"] = (-0.5 * (v - self.mu)**2 / var +
                             ((v / var) * h.mm(self.W.T)))
-        batch_size = v.shape[0]
-        grad["G1"] = torch.zeros(batch_size, *self.G1.shape)
-        grad["G2"] = torch.zeros(batch_size, *self.G2.shape)
         return grad
     
     @torch.no_grad()
@@ -389,13 +362,13 @@ class RBM(nn.Module):
         pos_grad = self._energy_grad_param_no_avg(v_data, h_data)
         neg_grad = self._energy_grad_param_no_avg(v_model, h_model)
         grad = {}
-        critic = self._gan_critic(v_model)
+        critic = torch.tensor(self.critic.predict(v_model)).type(v_data.dtype)
         for key in pos_grad.keys():
             grad[key] = torch.mean(pos_grad[key] - neg_grad[key], dim=0)
             if critic is not None:
                 grad[key] = gamma * grad[key] + (1 - gamma) * self._adversarial_grad(critic, neg_grad[key])
         return grad
-
+    
     @torch.no_grad()
     def _adversarial_grad(self, critic: torch.Tensor, param: torch.Tensor):
         """
@@ -415,34 +388,6 @@ class RBM(nn.Module):
         else:
             raise RuntimeError("bad")
         return cov.mean(axis=0)
-    
-    def _gan_forward(self, v: torch.Tensor):
-        """
-        @args
-        - v: torch.Tensor ~ (batch_size, n_vis)
-
-        We pass v through the gan layer and 
-
-        @returns
-        - torch.Tensor ~ (batch_size)
-        """
-        # change h->v
-        # _, h = self._block_gibbs_sample(v=v, n_gibbs=0)
-        node_vals = torch.relu(v @ self.G1)
-        return torch.tanh(node_vals @ self.G2)
-
-    @torch.no_grad()
-    def _gan_critic(self, v: torch.Tensor):
-        """
-        @args
-        - v: torch.Tensor ~ (batch_size, n_vis)
-
-        We pass v through the gan layer and 
-
-        @returns
-        - torch.Tensor ~ (batch_size)
-        """
-        return self._gan_forward(v)
 
     @torch.no_grad()
     def _positive_grad(self, v: torch.Tensor):
@@ -494,6 +439,35 @@ class RBM(nn.Module):
         for name, param in self.named_parameters():
             param.grad = grad[name]
 
+    def fit_critic(self, x_data: np.ndarray, n_gibbs: int = 1):
+        """
+        @args:
+        - x_data: np.ndarray ~ (num_samples, n_vis)
+        """
+        self.critic = make_pipeline(StandardScaler(), SVC(gamma='auto'))
+        num_samples = x_data.shape[0]
+        y_data = np.ones(num_samples)
+        x_model, _ = self._block_gibbs_sample(torch.rand_like(torch.tensor(x_data)), n_gibbs=n_gibbs)
+        assert(x_model.shape[0] == num_samples)
+        y_model = -np.ones(num_samples)
+        indices = np.random.permutation(2*x_data.shape[0])
+        xs = np.vstack((x_data, x_model))[indices, :]
+        ys = np.vstack((y_data.reshape(-1, 1), y_model.reshape(-1, 1)))[indices, :]
+        self.critic.fit(xs[:1000,:], ys[:1000,:].ravel())
+    
+    def critic_metrics(self, x_data: np.ndarray, n_gibbs: int = 1):
+        num_samples = x_data.shape[0]
+        x_model, _ = self._block_gibbs_sample(torch.rand_like(torch.tensor(x_data)), n_gibbs=n_gibbs)
+        assert(x_model.shape[0] == num_samples)
+
+        data_pred = self.critic.predict(x_data)
+        model_pred = self.critic.predict(x_model)
+        tp = np.sum(data_pred == 1)
+        fp = np.sum(model_pred == 1)
+        tn = np.sum(model_pred == -1)
+        fn = np.sum(data_pred == -1)
+        return tp, fp, tn, fn
+
     def fit(self, X: np.ndarray, n_gibbs: int = 1,
             lr: float = 0.1, n_epochs: int = 100, batch_size: int = 10,
             gamma: float = 1.0, gamma_delay: int = 10, fail_tol: int = None,
@@ -534,12 +508,13 @@ class RBM(nn.Module):
                 batch_train_recon = \
                     self._reconstruction_MSE(torch.Tensor(batch[0]))
                 optimizer.zero_grad()
+                if epoch == gamma_delay and gamma < 1: # run once so no matter the parity, we have an initialized critic
+                    self.fit_critic(X, n_gibbs=n_gibbs)
                 if epoch >= gamma_delay and gamma < 1:
-                    if epoch % 2 == 0:
-                        self.cd_grad_adversarial(batch[0], n_gibbs, gamma)
+                    if epoch % 5 == 0:
+                        self.fit_critic(X, n_gibbs=n_gibbs)
                     else:
-                        loss = self.gan_loss(batch[0])
-                        loss.backward()
+                        self.cd_grad_adversarial(batch[0], n_gibbs, gamma)
                 else:
                     loss = self.cd_loss(batch[0], n_gibbs)
                     loss.backward()
@@ -569,7 +544,11 @@ class RBM(nn.Module):
                             clamp=clamp, randn_init=False, n_gibbs=n_gibbs)
                     recon_mse, kl_data_model, kl_model_data \
                         = self.metrics(data_subset, n_gibbs=n_gibbs)
-                    msg += f" | loss: {round(loss.item(), 3)}"
+                    if epoch >= gamma_delay:
+                        tp, fp, tn, fn = self.critic_metrics(X)
+                        msg += f" | SVM accuracy: {round((tn+tp)/(tp+fp+tn+fn), 3)}"
+                        msg += f" | SVM precision: {round((tp/(tp+fp)), 3)}"
+                        msg += f" | SVM sensitivity: {round(tp/(tp+fn), 3)}"
                     msg += f" | recon_mse: {round(recon_mse, 3)}"
                     msg += f" | kl_data_model: {round(kl_data_model, 3)}"
                     msg += f" | kl_model_data: {round(kl_model_data, 3)}"
@@ -602,7 +581,7 @@ def load(checkpoint_path: str, metadata_path: str = None) -> RBM:
     with open(metadata_path, "r") as json_file:
         metadata = json.load(json_file)
     model = RBM(
-        metadata["n_vis"], metadata["n_hid"], metadata["var"], metadata["G1"], metadata["G2"]
+        metadata["n_vis"], metadata["n_hid"], metadata["var"]
     )
     model.load_state_dict(torch.load(checkpoint_path))
     return model
