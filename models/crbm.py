@@ -4,7 +4,7 @@ import torch.utils.data
 import numpy as np
 import json
 from .util_crbm import (
-    partition_into_batches, approx_kl_div
+    partition_into_batches, approx_kl_div, k_nearest_neighbors
 )
 torch.set_default_dtype(torch.float32)
 eps = np.finfo(np.float32).eps
@@ -295,9 +295,7 @@ class ConditionalRBM(nn.Module):
         """
         Computes the contrastive divergence loss with which parameters may be
         updated via an optimizer. Follows Algorithm 3 of
-        https://arxiv.org/pdf/2210.10318. Contrastive divergence loss 
-        may be combined with an adversarial loss as described in 
-        https://arxiv.org/abs/1804.08682. 
+        https://arxiv.org/pdf/2210.10318. 
 
         @args
         - v: np.array ~ (batch_size, n_vis)
@@ -316,8 +314,77 @@ class ConditionalRBM(nn.Module):
         L = self._energy(v_data, c, h_data) - self._energy(v_model, c, h_model)
         return L.mean()
     
-    def _experimental_critic(self, h_sample: torch.Tensor, k=5):
+    @torch.no_grad()
+    def _update_adversary_memory(self, v: np.ndarray, c: np.ndarray, 
+                                 n_gibbs = 10):
         """
+        Re-caches a minibatch of visible units drawn from the data and visible
+        units drawn from the model. 
+
+        @args
+        - v: np.array ~ (batch_size, n_vis)
+        = c: np.array ~ (batch_size, n_cond)
+        - n_gibbs: int << number of Gibbs sampling steps to sample from model
+        """
+        v_data = torch.Tensor(v)
+        c = torch.Tensor(c)
+        _, h_data = self._block_gibbs_sample(c, v_data, n_gibbs=0)
+        _, h_model = self._block_gibbs_sample(c, v_data, n_gibbs=n_gibbs)
+        self.adversary_memory = np.vstack((h_model.numpy(), h_data.numpy()))
+    
+    @torch.no_grad()
+    def _adversarial_grad(self, critic: torch.Tensor, param: torch.Tensor):
+        """
+        @args
+        - critic: torch.Tensor ~ (batch_size)
+        - param: torch.Tensor ~ (batch_size, n) or (batch_size, m, n)
+        """
+        batch_size = critic.shape[0]
+        param_subtracted = param - torch.mean(param, axis=0)
+        critic_subtracted = critic - torch.mean(critic, axis=0)
+        param_reshaped = param_subtracted.permute(*range(1, param.dim()), 0)
+        cov = torch.tensordot(param_reshaped, critic_subtracted,
+                                dims=([-1], [0]))
+        return cov / batch_size
+    
+    def cd_grad_adversarial(self, optimizer: torch.optim.Optimizer, 
+        v: np.ndarray, c: np.ndarray, gamma: float = 1, n_gibbs: int = 1):
+        """
+        Computes the contrastive divergence loss with which parameters may be
+        updated via an optimizer. Follows Algorithm 3 of
+        https://arxiv.org/pdf/2210.10318. Adversarial training included.
+
+        @args
+        - optimizer: torch Optimizer
+        - v: np.array ~ (batch_size, n_vis)
+        - c: np.array ~ (batch_size, n_cond)
+        - n_gibbs: int
+
+        @returns
+        - torch.Tensor ~ (1) << contrastive divergence loss
+        """
+        v_data: torch.Tensor = torch.Tensor(v)
+        c: torch.Tensor = torch.Tensor(c)
+        _, h_data = self._block_gibbs_sample(c, v_data, 
+                                              n_gibbs=0)
+        v_model, h_model = self._block_gibbs_sample(c, torch.randn_like(v_data), 
+                                              n_gibbs=n_gibbs)
+        critic = self._nearest_neighbors_critic(h_model)
+        optimizer.zero_grad()
+        L = self._energy(v_data, c, h_data) - self._energy(v_model, c, h_model)
+        L.mean().backward()
+        if critic is not None:
+            self.W.grad = self.W.grad * gamma + (1 - gamma) * \
+                self._adversarial_grad(critic, \
+                    -((v_model / self._variance(c))[:, :, np.newaxis] \
+                      @ h_model[:, np.newaxis, :]))
+        optimizer.step()
+    
+    @torch.no_grad()
+    def _nearest_neighbors_critic(self, h_sample: torch.Tensor, k=5):
+        """
+        Nearest neighbors linear critic. 
+
         @args
         - h_sample: torch.Tensor ~ (batch_size, n_hid)
         - k: int << the k in k-nearest neighbors
@@ -330,11 +397,98 @@ class ConditionalRBM(nn.Module):
         batch_size = h_sample.shape[0]
         if batch_size < k:
             return None
-        with torch.no_grad():
-            j = torch.sum(self.adversary_memory(h_sample) >= 0.5)
-        return torch.Tensor(j / batch_size - 1)
+        ind, _ = k_nearest_neighbors(self.adversary_memory, h_sample, k)
+        j = np.sum(ind >= batch_size, axis=1)
+        return torch.Tensor(2 * j / k - 1)
     
-    def fit_autograd(self, X: np.ndarray, y: np.ndarray, n_gibbs: int = 1,
+    def fit_adversarial(self, X: np.ndarray, y: np.ndarray, n_gibbs: int = 1,
+            lr: float = 0.1, n_epochs: int = 1, batch_size: int = 1,
+            fail_tol: int = None, rng_seed: int = 0, gamma: float = 1,
+            gamma_delay: int = 0, verbose_interval: int = None, 
+            reduce_lr_on_plateau = False, checkpoint_path = None):
+        """
+        Built-in, simple train method that relies on Torch autograd 
+        for computation of gradients. Robust to NaNs in X. Conditional values
+        in y, so model learns P(X | y). 
+        """
+        stats = {
+            'epoch_num': [],
+            'recon_mse': [],
+            'kl_data_model': [],
+            'kl_model_data': []
+        }
+        self.reset_seed(rng_seed)
+        contains_missing = np.any(np.isnan(X))
+        if fail_tol is None:
+            fail_tol = n_epochs
+        optimizer = torch.optim.SGD(self.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+        recon_loss_history = 1000
+        fail_count = 0
+        for epoch in range(0, n_epochs + 1):
+            if fail_count >= fail_tol:
+                break
+            recon_loss = 0
+            self.train()
+            batched_train_data, _ = partition_into_batches([X, y], \
+                batch_size, rng_seed + epoch)
+            for batch in batched_train_data:
+                if contains_missing:
+                    missing_mask = np.isnan(batch[0])
+                    clamp = np.logical_not(missing_mask)
+                    batch[0][missing_mask] = 0
+                    batch[0] = self.reconstruct(v=batch[0], c=batch[1], 
+                                                clamp=clamp, random_init=False, 
+                                                n_gibbs=n_gibbs)
+                batch_train_recon = \
+                    self._reconstruction_MSE(torch.Tensor(batch[0]), 
+                                             torch.Tensor(batch[1]))
+                if gamma < 1 and epoch >= gamma_delay:
+                    self.cd_grad_adversarial(optimizer, batch[0], batch[1], 
+                                             gamma, n_gibbs)
+                else:
+                    optimizer.zero_grad()
+                    loss = self.cd_loss(batch[0], batch[1], n_gibbs)
+                    loss.backward()
+                    optimizer.step()
+                    recon_loss += batch_train_recon
+                if epoch >= gamma_delay and gamma < 1:
+                    self._update_adversary_memory(batch[0], batch[1], 
+                                                  n_gibbs=n_gibbs)
+            recon_loss /= len(batched_train_data)
+            if reduce_lr_on_plateau:
+                scheduler.step(recon_loss)
+            if recon_loss > recon_loss_history:
+                fail_count += 1
+            else:
+                fail_count = 0
+            recon_loss_history = recon_loss
+            if verbose_interval is not None:
+                if epoch % verbose_interval == 0:
+                    msg = f"\repoch: {str(epoch).zfill(len(str(n_epochs)))}"
+                    msg += f" of {n_epochs}"
+                    metrics_idx = np.random.choice(len(X), min(100, len(X)), 
+                                                   replace=False)
+                    recon_mse, kl_data_model, kl_model_data \
+                        = self.metrics(X[metrics_idx], y[metrics_idx], 
+                                       n_gibbs=n_gibbs)
+                    msg += f" | recon_mse: {round(recon_mse, 3)}"
+                    msg += f" | kl_data_model: {round(kl_data_model, 3)}"
+                    msg += f" | kl_model_data: {round(kl_model_data, 3)}"
+                    print(msg, end="\n")
+                    stats['epoch_num'].append(epoch)
+                    stats['recon_mse'].append(recon_mse)
+                    stats['kl_data_model'].append(kl_data_model)
+                    stats['kl_model_data'].append(kl_model_data)
+        if checkpoint_path is not None:
+            metadata_path = ".".join(checkpoint_path.split(".")[:-1]) + \
+                ".json"
+            torch.save(self.state_dict(), checkpoint_path)
+            with open(metadata_path, "w") as json_file:
+                json.dump(self.metadata(), json_file)
+        return stats
+    
+    def fit(self, X: np.ndarray, y: np.ndarray, n_gibbs: int = 1,
             lr: float = 0.1, n_epochs: int = 1, batch_size: int = 1,
             fail_tol: int = None, rng_seed: int = 0, 
             verbose_interval: int = None, reduce_lr_on_plateau = False, 
