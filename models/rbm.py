@@ -198,7 +198,7 @@ class RBM(nn.Module):
                                         generator=self.rng)
         return v_sample, h_sample
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def _variance(self):
         """
         Returns the variance; we only attempt to train the log variance.

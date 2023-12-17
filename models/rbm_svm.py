@@ -7,8 +7,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from .util_rbm import (
-    partition_into_batches, k_nearest_neighbors, inverse_distance_sum, 
-    approx_kl_div
+    partition_into_batches, approx_kl_div
 )
 torch.set_default_dtype(torch.float32)
 
@@ -201,7 +200,7 @@ class RBM(nn.Module):
                                         generator=self.rng)
         return v_sample, h_sample
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def _variance(self):
         """
         Returns the variance; we only attempt to train the log variance.
@@ -362,11 +361,15 @@ class RBM(nn.Module):
         pos_grad = self._energy_grad_param_no_avg(v_data, h_data)
         neg_grad = self._energy_grad_param_no_avg(v_model, h_model)
         grad = {}
-        critic = torch.tensor(self.critic.predict(v_model)).type(v_data.dtype)
+        critic = np.log(2) + \
+            torch.Tensor(self.critic.predict_log_proba(v_model))[:, 1]
+        # print("critic shape: ", critic.shape)
+        # print("critic classes: ", self.critic.classes_)
         for key in pos_grad.keys():
             grad[key] = torch.mean(pos_grad[key] - neg_grad[key], dim=0)
             if critic is not None:
-                grad[key] = gamma * grad[key] + (1 - gamma) * self._adversarial_grad(critic, neg_grad[key])
+                grad[key] = gamma * grad[key] + (1 - gamma) * \
+                    self._adversarial_grad(critic, neg_grad[key])
         return grad
     
     @torch.no_grad()
@@ -375,19 +378,14 @@ class RBM(nn.Module):
         @args
         - critic: torch.Tensor ~ (batch_size)
         - param: torch.Tensor ~ (batch_size, n) or (batch_size, m, n)
-
-        @return
-        - torch.Tensor ~ (n) or (m,n)
         """
         batch_size = critic.shape[0]
         param_subtracted = param - torch.mean(param, axis=0)
-        if len(param.shape) == 3:
-            cov = critic.reshape(-1, 1, 1) * param_subtracted
-        elif len(param.shape) == 2:
-            cov = critic.reshape(-1, 1) * param_subtracted
-        else:
-            raise RuntimeError("bad")
-        return cov.mean(axis=0)
+        critic_subtracted = critic - torch.mean(critic, axis=0)
+        param_reshaped = param_subtracted.permute(*range(1, param.dim()), 0)
+        cov = torch.tensordot(param_reshaped, critic_subtracted,
+                                dims=([-1], [0]))
+        return cov / batch_size
 
     @torch.no_grad()
     def _positive_grad(self, v: torch.Tensor):
@@ -439,33 +437,33 @@ class RBM(nn.Module):
         for name, param in self.named_parameters():
             param.grad = grad[name]
 
-    def fit_critic(self, x_data: np.ndarray, n_gibbs: int = 1):
+    def fit_critic(self, x_data: np.ndarray, n_gibbs: int = 10):
         """
         @args:
         - x_data: np.ndarray ~ (num_samples, n_vis)
         """
-        self.critic = make_pipeline(StandardScaler(), SVC(gamma='auto'))
+        self.critic = make_pipeline(StandardScaler(), SVC(probability=True, 
+                                                          gamma='auto'))
         num_samples = x_data.shape[0]
         y_data = np.ones(num_samples)
-        x_model, _ = self._block_gibbs_sample(torch.rand_like(torch.tensor(x_data)), n_gibbs=n_gibbs)
+        x_model = self.reconstruct(v=x_data, n_gibbs=n_gibbs, add_noise=True)
         assert(x_model.shape[0] == num_samples)
-        y_model = -np.ones(num_samples)
-        indices = np.random.permutation(2*x_data.shape[0])
-        xs = np.vstack((x_data, x_model))[indices, :]
-        ys = np.vstack((y_data.reshape(-1, 1), y_model.reshape(-1, 1)))[indices, :]
-        self.critic.fit(xs[:1000,:], ys[:1000,:].ravel())
+        y_model = np.zeros(num_samples)
+        xs = np.vstack((x_data[:500, :], x_model[:500, :]))
+        ys = np.hstack((y_data[:500], y_model[:500]))
+        self.critic.fit(xs, ys)
     
     def critic_metrics(self, x_data: np.ndarray, n_gibbs: int = 1):
         num_samples = x_data.shape[0]
-        x_model, _ = self._block_gibbs_sample(torch.rand_like(torch.tensor(x_data)), n_gibbs=n_gibbs)
+        x_model, _ = self._block_gibbs_sample(torch.rand_like(\
+            torch.tensor(x_data)), n_gibbs=n_gibbs)
         assert(x_model.shape[0] == num_samples)
-
         data_pred = self.critic.predict(x_data)
         model_pred = self.critic.predict(x_model)
         tp = np.sum(data_pred == 1)
         fp = np.sum(model_pred == 1)
-        tn = np.sum(model_pred == -1)
-        fn = np.sum(data_pred == -1)
+        tn = np.sum(model_pred == 0)
+        fn = np.sum(data_pred == 0)
         return tp, fp, tn, fn
 
     def fit(self, X: np.ndarray, n_gibbs: int = 1,
@@ -546,6 +544,10 @@ class RBM(nn.Module):
                         = self.metrics(data_subset, n_gibbs=n_gibbs)
                     if epoch >= gamma_delay:
                         tp, fp, tn, fn = self.critic_metrics(X)
+                        # print('tp:', tp)
+                        # print('fp:', fp)
+                        # print('tn:', tn)
+                        # print('fn:', fn)
                         msg += f" | SVM accuracy: {round((tn+tp)/(tp+fp+tn+fn), 3)}"
                         msg += f" | SVM precision: {round((tp/(tp+fp)), 3)}"
                         msg += f" | SVM sensitivity: {round(tp/(tp+fn), 3)}"
