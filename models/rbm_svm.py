@@ -449,9 +449,10 @@ class RBM(nn.Module):
         x_model = self.reconstruct(v=x_data, n_gibbs=n_gibbs, add_noise=True)
         assert(x_model.shape[0] == num_samples)
         y_model = np.zeros(num_samples)
-        xs = np.vstack((x_data[:500, :], x_model[:500, :]))
-        ys = np.hstack((y_data[:500], y_model[:500]))
-        self.critic.fit(xs, ys)
+        indices = np.random.permutation(2*x_data.shape[0])
+        xs = np.vstack((x_data, x_model))[indices, :]
+        ys = np.vstack((y_data.reshape(-1, 1), y_model.reshape(-1, 1)))[indices, :]
+        self.critic.fit(xs[:1000,:], ys[:1000,:].ravel())
     
     def critic_metrics(self, x_data: np.ndarray, n_gibbs: int = 1):
         num_samples = x_data.shape[0]
