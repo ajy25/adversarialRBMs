@@ -1,6 +1,6 @@
 # Adversarially Trained Restricted Boltzmann Machines
 This respository contains an implementations of Gaussian-Bernoulli RBMs and conditional RBMs described in our term paper 
-[Adversarially Trained Restricted Boltzmann Machines](https://drive.google.com/file/d/1E3neLycZpeZHpIjeLM041KUa8acW1DBr/view?usp=sharing). 
+[Adversarially Trained Restricted Boltzmann Machines](https://drive.google.com/file/d/1E3neLycZpeZHpIjeLM041KUa8acW1DBr/view?usp=sharing) for the course CSCI 2952Q taught by Professor Yu Cheng at Brown University. 
 
 ### Key References: Papers
 1. [Boltzmann Encoded Adversarial Machines](https://arxiv.org/abs/1804.08682) (Fisher et al 2018)
