@@ -19,5 +19,5 @@ The following GitHub repositories were used as reference in the developement of 
 2. PyTorch >= 2.1.1
 3. NumPy >= 1.24.3
 4. SciPy >= 1.11.1
-5. Scikit >= 1.3.0
+5. scikit-learn >= 1.3.0
 
